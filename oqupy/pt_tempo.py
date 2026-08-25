@@ -229,7 +229,8 @@ class PtTempo(BaseAPIClass):
                 dkmax=dkmax,
                 epsrel=self._parameters.epsrel,
                 config=self._backend_config,
-                degeneracy_maps=degeneracy_maps)
+                degeneracy_maps=degeneracy_maps,
+                influence_is_tensor=not self._bath.commuting_channels)
 
     def _influence(self, dk: int) -> ndarray:
         """Create the influence functional matrix for a time step distance
@@ -273,15 +274,18 @@ class PtTempo(BaseAPIClass):
             {``silent``, ``simple``, ``bar``}. If `None` then
             the default progress type is used.
         """
-        if self._backend_instance.step is None:
-            self._backend_instance.initialize()
-
         progress = get_progress(progress_type)
         title = "--> PT-TEMPO computation:"
-        with progress(self._backend_instance.num_steps, title) as prog_bar:
+        with progress(self._backend_instance.num_steps +
+                      self._backend_instance.num_influences, title) as prog_bar:
+            if self._backend_instance.step is None:
+                self._backend_instance.initialize(
+                    progress_callback=prog_bar.update)
             while self._backend_instance.compute_step():
-                prog_bar.update(self._backend_instance.step)
-            prog_bar.update(self._backend_instance.step)
+                prog_bar.update(self._backend_instance.num_influences +
+                                self._backend_instance.step)
+            prog_bar.update(self._backend_instance.num_influences +
+                            self._backend_instance.step)
 
     def get_process_tensor(
             self,

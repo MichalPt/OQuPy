@@ -14,6 +14,7 @@ Module for tensor network process tensor tempo backend.
 """
 
 from typing import Callable, Dict, Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from numpy import ndarray, zeros
@@ -64,7 +65,9 @@ class PtTempoBackend:
             dkmax: int,
             epsrel: float,
             config: Dict,
-            degeneracy_maps: Optional[List[ndarray]] = None):
+            degeneracy_maps: Optional[List[ndarray]] = None,
+            influence_is_tensor: bool = False,
+            progress_callback: Optional[Callable[[int], None]] = None):
         """Create a BasePtTempoBackend object. """
         self._dimension = dimension
         self._influence = influence
@@ -77,6 +80,8 @@ class PtTempoBackend:
         self._config = config
         self._step = None
         self._degeneracy_maps = degeneracy_maps
+        self._influence_is_tensor = influence_is_tensor
+        self._progress_callback = progress_callback
 
         if "backend" in config:
             self._backend = config["backend"]
@@ -102,8 +107,15 @@ class PtTempoBackend:
         """The current step in the PT-TEMPO computation. """
         return self._num_steps
 
-    def initialize(self) -> None:
+    @property
+    def num_influences(self) -> int:
+        """Number of influence tensors precomputed during initialization."""
+        return self._num_infl
+
+    def initialize(self, progress_callback=None) -> None:
         """Initializes the PT-TEMPO tensor network. """
+        if progress_callback is not None:
+            self._progress_callback = progress_callback
         # create mpo
         # create mpo last
         # copy and contract mpo to mps
@@ -116,11 +128,31 @@ class PtTempoBackend:
             tmp_north_deg_num_vals = numpy_max(north_degeneracy_map)+1
             tmp_west_deg_num_vals = numpy_max(west_degeneracy_map)+1
 
+        influence_indices = range(self._num_infl)
+        if self._config.get("influence_parallel") == "multithread":
+            workers = self._config.get("influence_workers")
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(self._influence, i): i
+                    for i in influence_indices}
+                influence_values = [None] * self._num_infl
+                for completed in as_completed(futures):
+                    influence_values[futures[completed]] = completed.result()
+                    if self._progress_callback is not None:
+                        self._progress_callback(
+                            sum(value is not None for value in influence_values))
+        else:
+            influence_values = []
+            for i in influence_indices:
+                influence_values.append(self._influence(i))
+                if self._progress_callback is not None:
+                    self._progress_callback(i + 1)
+
         influences_mpo = []
         influences_mps = []
-        for i in range(self._num_infl):
+        for i, influence_value in enumerate(influence_values):
             if i == 0:
-                infl = self._influence(i)
+                infl = influence_value
                 infl = infl / scale
                 if self._degeneracy_maps is not None:
                     tmp_mpo = zeros((tmp_west_deg_num_vals,
@@ -142,14 +174,28 @@ class PtTempoBackend:
                     infl_mpo = util.create_delta(infl, [1, 1, 0])
                     infl_mps = infl.T / scale
             elif i == self._num_infl-1:
-                infl = self._influence(i)
-                infl_mpo = util.add_singleton(infl, 1)
-                infl_mpo = util.add_singleton(infl_mpo, 3)
-                infl_mps = util.add_singleton(infl, 2)
+                infl = influence_value
+                if self._influence_is_tensor:
+                    terminal_infl_raw = np.einsum('abca->bc', infl)
+                    terminal_infl = terminal_infl_raw \
+                        / self._dimension**2
+                    infl_mpo = util.add_singleton(terminal_infl, 1)
+                    infl_mpo = util.add_singleton(infl_mpo, 3)
+                    infl_mps = util.add_singleton(terminal_infl_raw, 2)
+                else:
+                    infl_mpo = util.add_singleton(infl, 1)
+                    infl_mpo = util.add_singleton(infl_mpo, 3)
+                    infl_mps = util.add_singleton(infl, 2)
             else:
-                infl = self._influence(i)
-                infl_mpo = util.create_delta(infl, [0, 1, 1, 0])
-                infl_mps = util.create_delta(infl / scale, [0, 1, 0])
+                infl = influence_value
+                if self._influence_is_tensor:
+                    infl_mpo = infl
+                else:
+                    infl_mpo = util.create_delta(infl, [0, 1, 1, 0])
+                if self._influence_is_tensor:
+                    infl_mps = np.einsum('wnes->wns', infl_mpo) / scale
+                else:
+                    infl_mps = util.create_delta(infl / scale, [0, 1, 0])
 
             influences_mpo.append(infl_mpo)
             influences_mps.append(infl_mps)
@@ -239,8 +285,14 @@ class PtTempoBackend:
                 dk = int(0 - self._step)
                 infl = self._influence(dk)
                 if infl is not None:
-                    infl_mpo = util.add_singleton(infl, 1)
-                    infl_mpo = util.add_singleton(infl_mpo, 3)
+                    if self._influence_is_tensor:
+                        terminal_infl = np.einsum('abca->bc', infl) \
+                            / self._dimension**2
+                        infl_mpo = util.add_singleton(terminal_infl, 1)
+                        infl_mpo = util.add_singleton(infl_mpo, 3)
+                    else:
+                        infl_mpo = util.add_singleton(infl, 1)
+                        infl_mpo = util.add_singleton(infl_mpo, 3)
                     last_mpo = na.NodeArray(
                             [infl_mpo],
                             left=True,

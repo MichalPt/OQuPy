@@ -326,19 +326,25 @@ def _complex_integral(
         a: Optional[float] = 0.0,
         b: Optional[float] = 1.0,
         epsrel: Optional[float] = INTEGRATE_EPSREL,
-        limit: Optional[int] = SUBDIV_LIMIT) -> complex:
-    re_int = integrate.quad(lambda x: np.real(integrand(x)),
-                            a=a,
-                            b=b,
-                            epsrel=epsrel,
-                            limit=limit)[0]
-    im_int = integrate.quad(lambda x: np.imag(integrand(x)),
-                            a=a,
-                            b=b,
-                            epsrel=epsrel,
-                            limit=limit)[0]
+        limit: Optional[int] = SUBDIV_LIMIT,
+        points: Optional[ArrayLike] = None) -> complex:
+    re_int = _quad_piecewise(lambda x: np.real(integrand(x)), a, b,
+                             epsrel, limit, points)
+    im_int = _quad_piecewise(lambda x: np.imag(integrand(x)), a, b,
+                             epsrel, limit, points)
 
     return re_int + 1j * im_int
+
+
+def _quad_piecewise(func, a, b, epsrel, limit, points=None, **kwargs):
+    """Integrate a tabulated function interval by interval."""
+    if points is None or not np.isfinite(b):
+        return integrate.quad(func, a=a, b=b, epsrel=epsrel,
+                              limit=limit, **kwargs)[0]
+    boundaries = [a] + [point for point in points if a < point < b] + [b]
+    return sum(integrate.quad(func, a=left, b=right,
+                              epsrel=epsrel, limit=limit, **kwargs)[0]
+               for left, right in zip(boundaries[:-1], boundaries[1:]))
 
 class CustomSD(BaseCorrelations):
     r"""
@@ -396,6 +402,7 @@ class CustomSD(BaseCorrelations):
             epsrel: Optional[float] = BATH_EPSREL,
             subdiv_limit: Optional[int] = BATH_SUBDIV_LIMIT,
             omega_tau_threshold: Optional[float] = OMEGA_TAU_THRESHOLD,
+            integration_points: Optional[ArrayLike] = None,
             name: Optional[Text] = None,
             description: Optional[Text] = None) -> None:
         """Create a CustomFunctionSD (spectral density) object. """
@@ -435,6 +442,8 @@ class CustomSD(BaseCorrelations):
         self.epsrel = epsrel
         self.subdiv_limit = subdiv_limit
         self.omega_tau_threshold = omega_tau_threshold
+        self.integration_points = None if integration_points is None else \
+            tuple(float(point) for point in integration_points)
 
         self._cutoff_function = \
             lambda omega: CUTOFF_DICT[self.cutoff_type](omega, self.cutoff)
@@ -642,7 +651,8 @@ class CustomSD(BaseCorrelations):
 
         if tau * omega_cutoff < 1.0:
             integral = _complex_integral(
-                integrand, a=0, b=omega_cutoff, **kwargs)
+                integrand, a=0, b=omega_cutoff,
+                points=self.integration_points, **kwargs)
             if self.cutoff_type!="hard":
                 integral += _complex_integral(
                     integrand, a=omega_cutoff, b=np.inf, **kwargs)
@@ -691,24 +701,27 @@ class CustomSD(BaseCorrelations):
         # -- step 1 --
 
         integral = _complex_integral(
-            integrand, a=0.0, b=omega_tilde, **kwargs)
+            integrand, a=0.0, b=omega_tilde,
+            points=self.integration_points, **kwargs)
 
         # -- step 2 --
 
         # + A(w) cos(wt)
-        integral += integrate.quad(
-            intA, a=omega_tilde, b=omega_bound, weight='cos', wvar=tau,
-            **kwargs)[0]
+        integral += _quad_piecewise(
+            intA, omega_tilde, omega_bound, **kwargs,
+            points=self.integration_points, weight='cos', wvar=tau)
         # - A(w)
-        integral -= integrate.quad(
-            intA, a=omega_tilde, b=omega_bound, **kwargs)[0]
+        integral -= _quad_piecewise(
+            intA, omega_tilde, omega_bound, **kwargs,
+            points=self.integration_points)
         # - i B(w) sin(wt)
-        integral -= 1.0j * integrate.quad(
-            intB, a=omega_tilde, b=omega_bound, weight='sin', wvar=tau,
-            **kwargs)[0]
+        integral -= 1.0j * _quad_piecewise(
+            intB, omega_tilde, omega_bound, **kwargs,
+            points=self.integration_points, weight='sin', wvar=tau)
         # + i C(w) t
-        integral += 1.0j * tau * integrate.quad(
-            intC, a=omega_tilde, b=omega_bound, **kwargs)[0]
+        integral += 1.0j * tau * _quad_piecewise(
+            intC, omega_tilde, omega_bound, **kwargs,
+            points=self.integration_points)
 
         return -integral
 

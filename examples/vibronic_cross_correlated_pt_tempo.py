@@ -43,7 +43,8 @@ def _spectral_density_matrix(Js, conversion_factor):
     return frequency_cm1 * conversion_factor, spectra_rad_fs
 
 
-def _make_custom_sd(frequency, values, temperature, cutoff):
+def _make_custom_sd(frequency, values, temperature, cutoff,
+                    epsrel=1.0e-6, subdiv_limit=64):
     """Build a piecewise-linear CustomSD without applying another cutoff."""
     frequency = np.asarray(frequency, dtype=float)
     values = np.asarray(values, dtype=complex).copy()
@@ -64,10 +65,16 @@ def _make_custom_sd(frequency, values, temperature, cutoff):
         cutoff=cutoff,
         cutoff_type="hard",
         temperature=temperature,
+        epsrel=epsrel,
+        subdiv_limit=subdiv_limit,
+        integration_points=frequency,
     )
 
 
-def run_cross_correlated_pt_tempo(params, Js, ftime=None, dt=None, dkmax=None):
+def run_cross_correlated_pt_tempo(params, Js, ftime=None, dt=None,
+                                  dkmax=None, epsrel=7.209e-12,
+                                  correlation_epsrel=1.0e-6,
+                                  backend_config=None):
     """Compute dynamics using the original, non-decomposed spectral tensor."""
     if ftime is None:
         ftime = params["ftime"]
@@ -95,7 +102,8 @@ def run_cross_correlated_pt_tempo(params, Js, ftime=None, dt=None, dkmax=None):
         [np.conjugate(cross_ef_ee), np.conjugate(cross_ef_ff), auto_ef],
     ]
     correlation_matrix = [
-        [_make_custom_sd(frequency, values, temperature, cutoff)
+        [_make_custom_sd(frequency, values, temperature, cutoff,
+                  epsrel=correlation_epsrel)
          for values in row]
         for row in spectral_values
     ]
@@ -121,13 +129,14 @@ def run_cross_correlated_pt_tempo(params, Js, ftime=None, dt=None, dkmax=None):
     parameters = oqupy.TempoParameters(
         dt=dt,
         dkmax=dkmax,
-        epsrel=7.209e-12,
+        epsrel=epsrel,
     )
     process_tensor = oqupy.pt_tempo_compute(
         bath=bath,
         start_time=0.0,
         end_time=ftime,
         parameters=parameters,
+        backend_config=backend_config,
     )
     dynamics = oqupy.compute_dynamics(
         system=system,

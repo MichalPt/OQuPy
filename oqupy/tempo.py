@@ -1022,14 +1022,27 @@ def influence_matrix(
         anticommutators = [np.kron(operator, identity)
                            + np.kron(identity, operator.T)
                            for operator in coupling_operators]
-        generator = np.zeros((dimension**2, dimension**2), dtype=complex)
+        generator_dimension = dimension**2 if dk == 0 else dimension**4
+        generator = np.zeros((generator_dimension, generator_dimension),
+                             dtype=complex)
         for index_i, commutator_i in enumerate(commutators):
             for index_j, commutator_j in enumerate(commutators):
-                generator += eta_dk[index_i, index_j].real \
-                    * commutator_i @ commutator_j
-                generator += 1j * eta_dk[index_i, index_j].imag \
-                    * commutator_i @ anticommutators[index_j]
-        return expm(-generator)
+                if dk == 0:
+                    generator += eta_dk[index_i, index_j].real \
+                        * commutator_i @ commutator_j
+                    generator += 1j * eta_dk[index_i, index_j].imag \
+                        * commutator_i @ anticommutators[index_j]
+                else:
+                    generator += eta_dk[index_i, index_j].real \
+                        * np.kron(commutator_i, commutator_j)
+                    generator += 1j * eta_dk[index_i, index_j].imag \
+                        * np.kron(commutator_i, anticommutators[index_j])
+        influence = expm(-generator)
+        if dk == 0:
+            return influence
+        return influence.reshape((dimension**2, dimension**2,
+                                  dimension**2, dimension**2)).transpose(
+                                      0, 1, 3, 2)
 
     if np.ndim(eta_dk) == 2:
         op_p = np.asarray(op_p)
