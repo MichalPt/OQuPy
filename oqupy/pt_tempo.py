@@ -203,6 +203,8 @@ class PtTempo(BaseAPIClass):
 
     def _init_pt_tempo_backend(self):
         """Create and initialize the pt-tempo backend. """
+        if not self._bath.commuting_channels:
+            self._unique = False
         if self._unique:
             sum_north = np.ones(np.max(self._bath.north_degeneracy_map)+1,
                                 dtype=float)
@@ -250,6 +252,8 @@ class PtTempo(BaseAPIClass):
             correlations=self._correlations,
             coupling_acomm=self._bath.coupling_acomm,
             coupling_comm=self._bath.coupling_comm,
+            coupling_operators=None if self._bath.commuting_channels
+                else self._bath.coupling_operators,
             deg_positions=tmp_deg_positions)
 
     @property

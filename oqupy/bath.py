@@ -73,6 +73,8 @@ class Bath(BaseAPIClass):
         self._dimension = operators[0].shape[0]
         assert all(operator.shape == operators[0].shape for operator in operators), \
             "All coupling operators must have the same dimension."
+        self._original_coupling_operators = [operator.copy()
+                                             for operator in operators]
 
         # diagonalise the coupling operator
         if len(operators) == 1 and np.allclose(
@@ -82,11 +84,15 @@ class Bath(BaseAPIClass):
             _, v = np.linalg.eigh(operators[0])
         diagonal_operators = [v.conjugate().T @ operator @ v
                               for operator in operators]
-        assert all(np.allclose(operator, np.diag(operator.diagonal()))
-                   for operator in diagonal_operators), \
-            "Cross-correlated coupling operators must commute."
-        self._coupling_operators = [np.diag(operator.diagonal())
-                                    for operator in diagonal_operators]
+        self._commuting_channels = all(
+            np.allclose(operator, np.diag(operator.diagonal()))
+            for operator in diagonal_operators)
+        if self._commuting_channels:
+            self._coupling_operators = [np.diag(operator.diagonal())
+                                        for operator in diagonal_operators]
+        else:
+            self._coupling_operators = self._original_coupling_operators
+            self._unitary = np.identity(self._dimension)
         self._coupling_operator = self._coupling_operators[0]
         self._unitary = v
 
@@ -108,6 +114,8 @@ class Bath(BaseAPIClass):
 
         # input check for correlations.
         if isinstance(correlations, BaseCorrelations):
+            assert len(operators) == 1, \
+                "Multiple coupling operators require a correlation matrix."
             correlation_matrix = [[correlations]]
         else:
             correlation_matrix = [list(row) for row in correlations]
@@ -138,8 +146,15 @@ class Bath(BaseAPIClass):
 
     @property
     def coupling_operators(self) -> list:
-        """The diagonalised system coupling operators for all channels."""
-        return [operator.copy() for operator in self._coupling_operators]
+        """The system coupling operators for all channels."""
+        if self._commuting_channels:
+            return [operator.copy() for operator in self._coupling_operators]
+        return [operator.copy() for operator in self._original_coupling_operators]
+
+    @property
+    def commuting_channels(self) -> bool:
+        """Whether all multi-channel coupling operators commute."""
+        return self._commuting_channels
 
     @property
     def unitary_transform(self) -> np.ndarray:

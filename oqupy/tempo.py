@@ -31,6 +31,7 @@ from copy import copy
 
 import numpy as np
 from numpy import ndarray
+from scipy.linalg import expm
 
 from oqupy.bath import Bath
 from oqupy.base_api import BaseAPIClass
@@ -321,7 +322,8 @@ class Tempo(BaseAPIClass):
         self._system, self._initial_state, self._bath, self._dimension = \
                 _tempo_physical_input_parse(False, system, initial_state, bath)
 
-        self._correlations = self._bath.correlations
+        self._correlations = self._bath.correlations \
+            if self._bath.commuting_channels else self._bath.correlations_matrix
 
         assert isinstance(parameters, TempoParameters), \
             "Argument 'parameters' must be an instance of TempoParameters."
@@ -336,6 +338,8 @@ class Tempo(BaseAPIClass):
         assert isinstance(unique, bool), \
             "Argument 'unique' must be a boolean."
         self._unique = unique
+        if not self._bath.commuting_channels:
+            self._unique = False
 
         if backend_config is None:
             self._backend_config = TEMPO_BACKEND_CONFIG
@@ -374,6 +378,8 @@ class Tempo(BaseAPIClass):
             correlations=self._correlations,
             coupling_acomm=self._bath.coupling_acomm,
             coupling_comm=self._bath.coupling_comm,
+            coupling_operators=None if self._bath.commuting_channels
+                else self._bath.coupling_operators,
             deg_positions=tmp_deg_positions)
 
     def _time(self, step: int) -> float:
@@ -969,6 +975,7 @@ def influence_matrix(
         correlations: BaseCorrelations,
         coupling_acomm: ndarray,
         coupling_comm: ndarray,
+    coupling_operators: Optional[List[ndarray]] = None,
         deg_positions: Optional[List[ndarray]] = None):
     """Compute the influence functional matrix. """
     dt = parameters.dt
@@ -1003,6 +1010,26 @@ def influence_matrix(
             delta=dt, time_1=time_1, time_2=time_2, shape=shape)
     op_p = coupling_acomm
     op_m = coupling_comm
+
+    if coupling_operators is not None:
+        assert isinstance(correlations, (list, tuple)), \
+            "Noncommuting channels require a correlation matrix."
+        dimension = coupling_operators[0].shape[0]
+        identity = np.identity(dimension)
+        commutators = [np.kron(operator, identity)
+                       - np.kron(identity, operator.T)
+                       for operator in coupling_operators]
+        anticommutators = [np.kron(operator, identity)
+                           + np.kron(identity, operator.T)
+                           for operator in coupling_operators]
+        generator = np.zeros((dimension**2, dimension**2), dtype=complex)
+        for index_i, commutator_i in enumerate(commutators):
+            for index_j, commutator_j in enumerate(commutators):
+                generator += eta_dk[index_i, index_j].real \
+                    * commutator_i @ commutator_j
+                generator += 1j * eta_dk[index_i, index_j].imag \
+                    * commutator_i @ anticommutators[index_j]
+        return expm(-generator)
 
     if np.ndim(eta_dk) == 2:
         op_p = np.asarray(op_p)
