@@ -992,13 +992,43 @@ def influence_matrix(
         time_2 = None
         shape = "square"
 
-    eta_dk = correlations.correlation_2d_integral( \
-        delta=dt,
-        time_1=time_1,
-        time_2=time_2,
-        shape=shape)
+    if isinstance(correlations, (list, tuple)):
+        eta_dk = np.array([
+            [correlation.correlation_2d_integral(
+                delta=dt, time_1=time_1, time_2=time_2, shape=shape)
+             for correlation in row]
+            for row in correlations], dtype=complex)
+    else:
+        eta_dk = correlations.correlation_2d_integral(
+            delta=dt, time_1=time_1, time_2=time_2, shape=shape)
     op_p = coupling_acomm
     op_m = coupling_comm
+
+    if np.ndim(eta_dk) == 2:
+        op_p = np.asarray(op_p)
+        op_m = np.asarray(op_m)
+        assert op_p.ndim == 2 and op_m.ndim == 2, \
+            "Cross-correlated baths require channel-wise coupling operators."
+        if dk == 0:
+            exponent = -np.einsum(
+                'in,ij,jn->n', op_m, eta_dk.real, op_m) \
+                - 1j * np.einsum(
+                    'in,ij,jn->n', op_m, eta_dk.imag, op_p)
+            infl = np.exp(exponent)
+            if deg_positions is not None:
+                infl = infl[deg_positions[0]]
+            else:
+                infl = np.diag(infl)
+        else:
+            exponent = -np.einsum(
+                'in,ij,jm->nm', op_m, eta_dk.real, op_m) \
+                - 1j * np.einsum(
+                    'in,ij,jm->nm', op_m, eta_dk.imag, op_p)
+            infl = np.exp(exponent)
+            if deg_positions is not None:
+                north_deg_positions, west_deg_positions = deg_positions
+                infl = (infl[north_deg_positions].T)[west_deg_positions].T
+        return infl
 
     if dk == 0:
         infl = np.diag(np.exp(-op_m*(eta_dk.real*op_m \

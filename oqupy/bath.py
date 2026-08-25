@@ -48,52 +48,79 @@ class Bath(BaseAPIClass):
             name: Optional[Text] = None,
             description: Optional[Text] = None) -> None:
         """Creates a Bath object. """
-        # input check for coupling_operator.
-        try:
-            tmp_coupling_operator = np.array(coupling_operator, dtype=NpDtype)
-            tmp_coupling_operator.setflags(write=False)
-        except Exception as e:
-            raise AssertionError("Coupling operator must be numpy array") \
-                from e
-        assert len(tmp_coupling_operator.shape) == 2, \
-            "Coupling operator must be a matrix."
-        assert tmp_coupling_operator.shape[0] == \
-            tmp_coupling_operator.shape[1], \
-            "Coupling operator must be a square matrix."
-        assert np.allclose(tmp_coupling_operator.conjugate().T,
-                           tmp_coupling_operator), \
-            "Coupling operator must be a hermitian matrix."
-        self._dimension = tmp_coupling_operator.shape[0]
+        if isinstance(coupling_operator, (list, tuple)) and \
+                np.asarray(coupling_operator, dtype=object).ndim == 3:
+            try:
+                operators = [np.array(operator, dtype=NpDtype)
+                             for operator in coupling_operator]
+            except Exception as error:
+                raise AssertionError("Coupling operator must be numpy array") \
+                    from error
+        else:
+            try:
+                operators = [np.array(coupling_operator, dtype=NpDtype)]
+            except Exception as error:
+                raise AssertionError("Coupling operator must be numpy array") \
+                    from error
+        assert operators, "At least one coupling operator is required."
+        for operator in operators:
+            assert len(operator.shape) == 2, \
+                "Coupling operator must be a matrix."
+            assert operator.shape[0] == operator.shape[1], \
+                "Coupling operator must be a square matrix."
+            assert np.allclose(operator.conjugate().T, operator), \
+                "Coupling operator must be a hermitian matrix."
+        self._dimension = operators[0].shape[0]
+        assert all(operator.shape == operators[0].shape for operator in operators), \
+            "All coupling operators must have the same dimension."
 
         # diagonalise the coupling operator
-        if np.allclose(np.diag(tmp_coupling_operator.diagonal()),
-                        tmp_coupling_operator):
-            self._coupling_operator = tmp_coupling_operator
-            self._unitary = np.identity(self._dimension)
+        if len(operators) == 1 and np.allclose(
+                np.diag(operators[0].diagonal()), operators[0]):
+            v = np.identity(self._dimension)
         else:
-            w, v = np.linalg.eigh(tmp_coupling_operator)
-            self._coupling_operator = np.diag(w)
-            self._unitary = v
-            assert np.allclose(tmp_coupling_operator, \
-                self._unitary @ self._coupling_operator \
-                @ self._unitary.conjugate().T)
+            _, v = np.linalg.eigh(operators[0])
+        diagonal_operators = [v.conjugate().T @ operator @ v
+                              for operator in operators]
+        assert all(np.allclose(operator, np.diag(operator.diagonal()))
+                   for operator in diagonal_operators), \
+            "Cross-correlated coupling operators must commute."
+        self._coupling_operators = [np.diag(operator.diagonal())
+                                    for operator in diagonal_operators]
+        self._coupling_operator = self._coupling_operators[0]
+        self._unitary = v
 
         # identify degeneracies in eigensystem of coupling operator
-        tmp_coupling_comm = commutator(self._coupling_operator)
-        tmp_coupling_acomm = acommutator(self._coupling_operator)
-        self._coupling_comm = tmp_coupling_comm.diagonal()
-        self._coupling_acomm = tmp_coupling_acomm.diagonal()
+        coupling_comm = np.array([
+            commutator(operator).diagonal()
+            for operator in self._coupling_operators])
+        coupling_acomm = np.array([
+            acommutator(operator).diagonal()
+            for operator in self._coupling_operators])
+        self._coupling_comm = coupling_comm[0] if len(operators) == 1 \
+            else coupling_comm
+        self._coupling_acomm = coupling_acomm[0] if len(operators) == 1 \
+            else coupling_acomm
 
         self._north_degeneracy_map = _row_degeneracy([self._coupling_comm,
                                                       self._coupling_acomm])
         self._west_degeneracy_map = _row_degeneracy([self._coupling_comm])
 
         # input check for correlations.
-        if not isinstance(correlations, BaseCorrelations):
-            raise AssertionError(
-                "Correlations must be an instance of a subclass of " \
-                + "BaseCorrelations.")
-        self._correlations = copy(correlations)
+        if isinstance(correlations, BaseCorrelations):
+            correlation_matrix = [[correlations]]
+        else:
+            correlation_matrix = [list(row) for row in correlations]
+            assert len(correlation_matrix) == len(operators) and all(
+                len(row) == len(operators) for row in correlation_matrix), \
+                "Correlations must be a square matrix matching operators."
+        assert all(isinstance(correlation, BaseCorrelations)
+                   for row in correlation_matrix for correlation in row), \
+            "Correlations must contain BaseCorrelations instances."
+        self._correlations_matrix = [
+            [copy(correlation) for correlation in row]
+            for row in correlation_matrix]
+        self._correlations = self._correlations_matrix[0][0]
 
         super().__init__(name, description)
 
@@ -110,6 +137,11 @@ class Bath(BaseAPIClass):
         return self._coupling_operator.copy()
 
     @property
+    def coupling_operators(self) -> list:
+        """The diagonalised system coupling operators for all channels."""
+        return [operator.copy() for operator in self._coupling_operators]
+
+    @property
     def unitary_transform(self) -> np.ndarray:
         """The unitary that makes the coupling operator diagonal. """
         return self._unitary.copy()
@@ -123,6 +155,12 @@ class Bath(BaseAPIClass):
     def correlations(self) -> BaseCorrelations:
         """The correlations of the bath. """
         return copy(self._correlations)
+
+    @property
+    def correlations_matrix(self) -> list:
+        """The correlation-function matrix for all coupling channels."""
+        return [[copy(correlation) for correlation in row]
+                for row in self._correlations_matrix]
 
     @property
     def coupling_acomm(self) -> np.ndarray:

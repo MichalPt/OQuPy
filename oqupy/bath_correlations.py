@@ -403,10 +403,10 @@ class CustomSD(BaseCorrelations):
         # check input: j_function
         try:
             tmp_j_function = np.vectorize(j_function)
-            float(tmp_j_function(1.0))
+            complex(tmp_j_function(1.0))
         except Exception as e:
             raise AssertionError("Spectral density must be vectorizable " \
-                                 + "and must return float.") from e
+                                 + "and must return a number.") from e
         self.j_function = tmp_j_function
 
         # check input: cutoff
@@ -923,7 +923,7 @@ class PowerLawSD(CustomSD):
 
         # use parent class for all the rest.
         j_function = lambda w: 2.0 * self.alpha * w ** self.zeta \
-                               * self.cutoff ** (1 - zeta)
+                               * self.cutoff ** (1 - self.zeta)
 
         super().__init__(j_function,
                          cutoff=cutoff,

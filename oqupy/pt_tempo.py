@@ -103,7 +103,9 @@ class PtTempo(BaseAPIClass):
             "Argument 'bath' must be an instance of Bath."
         self._bath = bath
         self._dimension = self._bath.dimension
-        self._correlations = self._bath.correlations
+        self._correlations = self._bath.correlations \
+            if len(self._bath.coupling_operators) == 1 \
+            else self._bath.correlations_matrix
 
         super().__init__(name, description)
 
