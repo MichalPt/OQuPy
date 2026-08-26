@@ -318,6 +318,10 @@ class Tempo(BaseAPIClass):
 
         assert isinstance(bath, Bath), \
             "Argument 'bath' must be an instance of Bath."
+        if not bath.commuting_channels:
+            raise NotImplementedError(
+                "Noncommuting cross-correlated TEMPO channels require "
+                "a process-tensor embedding that is not implemented yet.")
         self._bath = bath
         self._system, self._initial_state, self._bath, self._dimension = \
                 _tempo_physical_input_parse(False, system, initial_state, bath)

@@ -101,6 +101,10 @@ class PtTempo(BaseAPIClass):
         """Create a PtTempo object. """
         assert isinstance(bath, Bath), \
             "Argument 'bath' must be an instance of Bath."
+        if not bath.commuting_channels:
+            raise NotImplementedError(
+                "Noncommuting cross-correlated PT-TEMPO channels require "
+                "a process-tensor embedding that is not implemented yet.")
         self._bath = bath
         self._dimension = self._bath.dimension
         self._correlations = self._bath.correlations \

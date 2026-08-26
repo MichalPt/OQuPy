@@ -63,6 +63,8 @@ __all__ = [
     'compute_gradient_and_dynamics',
     'Control',
     'Dynamics',
+     'DensePtTempo',
+     'GeneralizedInfluenceTensor',
     'FileProcessTensor',
     'GibbsParameters',
     'GibbsTempo',
@@ -113,6 +115,8 @@ from oqupy.bath_correlations import PowerLawSD
 
 from oqupy.dynamics import Dynamics
 from oqupy.dynamics import MeanFieldDynamics
+
+from oqupy.dense_pt_tempo import DensePtTempo, GeneralizedInfluenceTensor
 
 from oqupy.gradient import state_gradient
 from oqupy.gradient import compute_gradient_and_dynamics
