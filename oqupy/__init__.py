@@ -89,6 +89,7 @@ __all__ = [
     'Tempo',
     'tempo_compute',
     'TempoParameters',
+     'TransferTensorMap',
     'TimeDependentSystem',
     'TimeDependentSystemWithField',
     'TrivialProcessTensor',
@@ -153,3 +154,4 @@ from oqupy.tempo import MeanFieldTempo
 from oqupy.tempo import guess_tempo_parameters
 from oqupy.tempo import tempo_compute
 from oqupy.tempo import gibbs_tempo_compute
+from oqupy.transfer_tensor import TransferTensorMap

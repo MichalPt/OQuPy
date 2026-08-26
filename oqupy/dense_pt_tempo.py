@@ -137,8 +137,6 @@ class DensePtTempo:
     def compute(self) -> Dynamics:
         """Compute at most ``max_steps`` steps without tensor compression."""
         num_steps = self._max_steps
-        if self._parameters.dkmax is not None:
-            num_steps = min(num_steps, self._parameters.dkmax + 1)
         propagators = self._system.get_propagators(
             self._parameters.dt, self._start_time, None, None)
         influence = GeneralizedInfluenceTensor(self._bath, self._parameters)

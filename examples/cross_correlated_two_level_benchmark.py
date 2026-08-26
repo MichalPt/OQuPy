@@ -1,4 +1,4 @@
-"""Small cross-correlated PT-TEMPO benchmark for comparison with HEOM.
+"""Small dense cross-correlated TEMPO benchmark for comparison with HEOM.
 
 This example uses a two-level system with noncommuting coupling operators
 sigma_z and sigma_x. The 2x2 spectral-density matrix is
@@ -70,8 +70,9 @@ def make_custom_sd(function, temperature, cutoff, epsrel=1.0e-6):
 
 
 def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
-                  dt=0.05, ftime=1.0, dkmax=8, epsrel=1.0e-6):
-    """Run a short direct cross-correlated PT-TEMPO calculation.
+                  dt=0.05, ftime=0.5, dkmax=8, epsrel=1.0e-6,
+                  max_steps=10):
+    """Run a short dense cross-correlated TEMPO calculation.
 
     Returns
     -------
@@ -113,22 +114,19 @@ def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
     parameters = oqupy.TempoParameters(dt=dt, dkmax=dkmax,
                                        epsrel=epsrel)
 
-    process_tensor = oqupy.pt_tempo_compute(
-        bath=bath,
-        start_time=0.0,
-        end_time=ftime,
-        parameters=parameters,
-        backend_config={
-            "influence_parallel": "multithread",
-            "influence_workers": 2,
-        },
-    )
-    dynamics = oqupy.compute_dynamics(
+    if ftime is not None and int(ftime / dt) > max_steps:
+        raise ValueError(
+            "DensePtTempo is restricted to max_steps; increase dt or "
+            "decrease ftime.")
+    dynamics = oqupy.DensePtTempo(
         system=system,
-        process_tensor=process_tensor,
+        bath=bath,
+        parameters=parameters,
         initial_state=initial_state,
+        start_time=0.0,
+        max_steps=max_steps,
     )
-    return dynamics, spectral_functions
+    return dynamics.compute(), spectral_functions
 
 
 if __name__ == "__main__":
