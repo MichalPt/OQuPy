@@ -1,6 +1,7 @@
 """Transfer Tensor Method built on the dense noncommuting TEMPO reference."""
 
 from collections import deque
+import warnings
 from typing import List, Optional
 
 import numpy as np
@@ -64,6 +65,10 @@ class TransferTensorMap:
         self._memory_cutoff = memory_cutoff
         if memory_cutoff is not None and not 1 <= memory_cutoff <= self._learning_steps:
             raise ValueError("memory_cutoff must be between 1 and learning_steps.")
+        if transfer_tolerance is not None and \
+                (transfer_tolerance <= 0.0 or
+                 not np.isfinite(transfer_tolerance)):
+            raise ValueError("transfer_tolerance must be positive and finite.")
         self._transfer_tolerance = transfer_tolerance
         self._transfer_tensors = None
         self._dynamical_maps = None
@@ -86,6 +91,14 @@ class TransferTensorMap:
         if self._dynamical_maps is None:
             return None
         return [mapping.copy() for mapping in self._dynamical_maps]
+
+    @property
+    def transfer_norms(self) -> Optional[np.ndarray]:
+        """Frobenius norms of the learned transfer tensors."""
+        if self._transfer_tensors is None:
+            return None
+        return np.array([np.linalg.norm(tensor, ord="fro")
+                         for tensor in self._transfer_tensors])
 
     def learn(self) -> List[np.ndarray]:
         """Learn dynamical maps and transfer tensors from canonical states."""
@@ -118,6 +131,12 @@ class TransferTensorMap:
 
         self._dynamical_maps = maps
         self._transfer_tensors = tensors
+        if self._transfer_tolerance is not None and \
+            self._selected_memory() == self._learning_steps:
+            warnings.warn(
+            "Transfer tensors did not show a decayed tail below "
+            "transfer_tolerance; TTM extrapolation may be unreliable.",
+            UserWarning)
         return self.transfer_tensors
 
     def _selected_memory(self) -> int:
@@ -125,14 +144,11 @@ class TransferTensorMap:
             return self._memory_cutoff
         if self._transfer_tolerance is None:
             return self._learning_steps
-        norms = np.array([np.linalg.norm(tensor, ord="fro")
-                          for tensor in self._transfer_tensors])
-        cutoff = self._learning_steps
-        for index in range(len(norms) - 1, -1, -1):
-            if norms[index] >= self._transfer_tolerance:
-                cutoff = index + 1
-                break
-        return cutoff
+        norms = self.transfer_norms
+        for index in range(len(norms)):
+            if np.all(norms[index:] < self._transfer_tolerance):
+                return max(1, index)
+        return self._learning_steps
 
     def compute_dynamics(self, initial_state: np.ndarray, end_time: float,
                          start_time: float = 0.0) -> Dynamics:

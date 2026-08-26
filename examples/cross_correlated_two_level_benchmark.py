@@ -153,8 +153,9 @@ def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
 
 
 if __name__ == "__main__":
-    dynamics, _ = run_benchmark(method="ttm", ftime=5.0, dkmax=10,
-                                learning_steps=10, memory_cutoff=10)
+    dynamics, _ = run_benchmark(method="ttm", ftime=5.0, dkmax=20,
+                                learning_steps=20, memory_cutoff=10,
+                                transfer_tolerance=1e-8)
     print("times:", dynamics.times)
     print("<sigma_z>:", dynamics.expectations(
         oqupy.operators.sigma("z"), real=True)[1])
