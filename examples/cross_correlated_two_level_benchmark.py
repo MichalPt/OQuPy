@@ -72,7 +72,8 @@ def make_custom_sd(function, temperature, cutoff, epsrel=1.0e-6):
 def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
                   dt=0.05, ftime=0.5, dkmax=8, epsrel=1.0e-6,
                   method="dense", max_steps=10, learning_steps=10,
-                  memory_cutoff=None, transfer_tolerance=None):
+                  memory_cutoff=None, transfer_tolerance=None,
+                  progress_type=None):
     """Run a dense or transfer-tensor cross-correlated calculation.
 
     Returns
@@ -146,6 +147,7 @@ def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
             initial_state=initial_state,
             end_time=ftime,
             start_time=0.0,
+            progress_type=progress_type,
         )
     else:
         raise ValueError("method must be either 'dense' or 'ttm'.")

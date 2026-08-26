@@ -10,6 +10,7 @@ from oqupy.bath import Bath
 from oqupy.dense_pt_tempo import DensePtTempo
 from oqupy.dynamics import Dynamics
 from oqupy.tempo import TempoParameters
+from oqupy.util import get_progress
 
 
 class TransferTensorMap:
@@ -151,7 +152,8 @@ class TransferTensorMap:
         return self._learning_steps
 
     def compute_dynamics(self, initial_state: np.ndarray, end_time: float,
-                         start_time: float = 0.0) -> Dynamics:
+                         start_time: float = 0.0,
+                         progress_type: Optional[str] = None) -> Dynamics:
         """Propagate an initial state using learned transfer tensors."""
         if self._transfer_tensors is None:
             self.learn()
@@ -170,17 +172,21 @@ class TransferTensorMap:
         initial_vector = initial_state.reshape(-1)
         vector_states = deque([initial_vector],
                               maxlen=memory + 1)
-        for step in range(1, num_steps + 1):
-            if step <= self._learning_steps:
-                state_vector = self._dynamical_maps[step] \
-                    @ initial_vector
-            else:
-                state_vector = np.zeros(dimension**2, dtype=complex)
-                for lag, tensor in enumerate(tensors, start=1):
-                    if lag <= len(vector_states):
-                        state_vector += tensor @ vector_states[-lag]
-            vector_states.append(state_vector)
-            states.append(state_vector.reshape(dimension, dimension))
+        progress = get_progress(progress_type)(num_steps,
+                                                "TTM propagation:")
+        with progress as progress_bar:
+            for step in range(1, num_steps + 1):
+                if step <= self._learning_steps:
+                    state_vector = self._dynamical_maps[step] \
+                        @ initial_vector
+                else:
+                    state_vector = np.zeros(dimension**2, dtype=complex)
+                    for lag, tensor in enumerate(tensors, start=1):
+                        if lag <= len(vector_states):
+                            state_vector += tensor @ vector_states[-lag]
+                vector_states.append(state_vector)
+                states.append(state_vector.reshape(dimension, dimension))
+                progress_bar.update(step)
 
         times = float(start_time) + np.arange(num_steps + 1) * dt
         return Dynamics(times=list(times), states=states)
