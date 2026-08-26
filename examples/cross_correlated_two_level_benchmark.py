@@ -71,8 +71,9 @@ def make_custom_sd(function, temperature, cutoff, epsrel=1.0e-6):
 
 def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
                   dt=0.05, ftime=0.5, dkmax=8, epsrel=1.0e-6,
-                  max_steps=10):
-    """Run a short dense cross-correlated TEMPO calculation.
+                  method="dense", max_steps=10, learning_steps=10,
+                  memory_cutoff=None, transfer_tolerance=None):
+    """Run a dense or transfer-tensor cross-correlated calculation.
 
     Returns
     -------
@@ -114,23 +115,46 @@ def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
     parameters = oqupy.TempoParameters(dt=dt, dkmax=dkmax,
                                        epsrel=epsrel)
 
-    if ftime is not None and int(ftime / dt) > max_steps:
-        raise ValueError(
-            "DensePtTempo is restricted to max_steps; increase dt or "
-            "decrease ftime.")
-    dynamics = oqupy.DensePtTempo(
-        system=system,
-        bath=bath,
-        parameters=parameters,
-        initial_state=initial_state,
-        start_time=0.0,
-        max_steps=max_steps,
-    )
-    return dynamics.compute(), spectral_functions
+    if method == "dense":
+        if ftime is not None and int(ftime / dt) > max_steps:
+            raise ValueError(
+                "DensePtTempo is restricted to max_steps; increase dt or "
+                "decrease ftime.")
+        dense_solver = oqupy.DensePtTempo(
+            system=system,
+            bath=bath,
+            parameters=parameters,
+            initial_state=initial_state,
+            start_time=0.0,
+            max_steps=max_steps,
+        )
+        dynamics = dense_solver.compute()
+    elif method == "ttm":
+        if learning_steps < 1:
+            raise ValueError("learning_steps must be positive.")
+        if dkmax is None or dkmax < learning_steps:
+            raise ValueError("dkmax must be at least learning_steps for TTM.")
+        transfer_map = oqupy.TransferTensorMap(
+            system=system,
+            bath=bath,
+            parameters=parameters,
+            learning_steps=learning_steps,
+            memory_cutoff=memory_cutoff,
+            transfer_tolerance=transfer_tolerance,
+        )
+        dynamics = transfer_map.compute_dynamics(
+            initial_state=initial_state,
+            end_time=ftime,
+            start_time=0.0,
+        )
+    else:
+        raise ValueError("method must be either 'dense' or 'ttm'.")
+    return dynamics, spectral_functions
 
 
 if __name__ == "__main__":
-    dynamics, _ = run_benchmark()
+    dynamics, _ = run_benchmark(method="ttm", ftime=5.0, dkmax=10,
+                                learning_steps=10, memory_cutoff=10)
     print("times:", dynamics.times)
     print("<sigma_z>:", dynamics.expectations(
         oqupy.operators.sigma("z"), real=True)[1])
