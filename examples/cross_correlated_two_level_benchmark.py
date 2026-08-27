@@ -20,10 +20,11 @@ import oqupy
 
 
 # Use angular-frequency units consistently throughout this example.
-def lorentz_drude(omega, reorganization=0.2, gamma=1.0):
+def lorentz_drude(omega, reorganization=0.2, gamma=5.0):
     """Lorentz-Drude spectral density."""
     omega = np.asarray(omega)
-    return (2.0 * reorganization * gamma * omega /
+    # ADDED (1.0 / np.pi) to match QuTiP's integration convention
+    return (1.0 / np.pi) * (2.0 * reorganization * gamma * omega /
             (omega**2 + gamma**2))
 
 
@@ -32,7 +33,8 @@ def underdamped_brownian(omega, reorganization=0.2, omega_0=2.0,
     """Underdamped Brownian oscillator spectral density."""
     omega = np.asarray(omega)
     denominator = (omega**2 - omega_0**2)**2 + gamma**2 * omega**2
-    return (2.0 * reorganization * gamma * omega * omega_0**2 /
+    # ADDED (1.0 / np.pi) to match QuTiP's integration convention
+    return (1.0 / np.pi) * (2.0 * reorganization * gamma * omega * omega_0**2 /
             denominator)
 
 
