@@ -86,7 +86,7 @@ def run_benchmark(line_shape="lorentz-drude", rho=0.6, temperature=0.5,
         The exact scalar spectral-density entries, suitable for an HEOM
         implementation using analytic line-shape decompositions.
     """
-    cutoff = 20.0 if line_shape == "lorentz-drude" else 8.0
+    cutoff = 1000.0 if line_shape == "lorentz-drude" else 8.0
     scale_z, scale_x = (1.0, 0.8)
 
     if line_shape == "lorentz-drude":

@@ -75,6 +75,7 @@ __all__ = [
     'MeanFieldDynamics',
     'MeanFieldSystem',
     'MeanFieldTempo',
+     'MPSPtTempo',
     'operators',
     'ParameterizedSystem',
     'PowerLawSD',
@@ -118,6 +119,7 @@ from oqupy.dynamics import Dynamics
 from oqupy.dynamics import MeanFieldDynamics
 
 from oqupy.dense_pt_tempo import DensePtTempo, GeneralizedInfluenceTensor
+from oqupy.mps_cross_correlated import MPSPtTempo
 
 from oqupy.gradient import state_gradient
 from oqupy.gradient import compute_gradient_and_dynamics
