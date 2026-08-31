@@ -3,6 +3,7 @@
 from typing import Optional
 
 import numpy as np
+import scipy.linalg
 
 from oqupy.bath import Bath
 from oqupy.dense_pt_tempo import GeneralizedInfluenceTensor
@@ -37,30 +38,50 @@ class CrossCorrelatedMPS:
         self.tensors.append(new_tensor)
 
     def apply_one_site(self, site: int, operator):
-        self.tensors[site] = np.einsum(
-            "ab,lbr->lar", np.asarray(operator), self.tensors[site])
+        op_mat = np.asarray(operator)
+        tensor = self.tensors[site]
+        res = np.tensordot(op_mat, tensor, axes=([1], [1]))
+        self.tensors[site] = res.transpose(1, 0, 2)
 
     def apply_adjacent_gate(self, site: int, gate, direction="right"):
         """Apply an output/input gate to sites ``site`` and ``site+1``."""
         if direction not in ("left", "right"):
             raise ValueError("direction must be 'left' or 'right'")
+
         left = self.tensors[site]
         right = self.tensors[site + 1]
         left_dimension, physical = left.shape[0], left.shape[1]
         right_physical, right_dimension = right.shape[1], right.shape[2]
-        joint = np.einsum("lap,pbr->labr", left, right)
-        joint = np.einsum("ABab,labr->lABr", np.asarray(gate), joint)
-        joint = joint.reshape(left_dimension * physical,
-                              right_physical * right_dimension)
-        u, singular_values, vh = np.linalg.svd(joint, full_matrices=False)
-        if self.epsrel > 0.0 and singular_values.size:
+
+        joint = np.tensordot(left, right, axes=([2], [0]))
+        joint_mat = joint.transpose(1, 2, 0, 3).reshape(
+            physical * right_physical, left_dimension * right_dimension)
+
+        gate_mat = np.asarray(gate).reshape(physical * right_physical,
+                                            physical * right_physical)
+        joint_gated = np.dot(gate_mat, joint_mat)
+        joint_gated = joint_gated.reshape(physical, right_physical,
+                                          left_dimension, right_dimension)
+        joint_for_svd = joint_gated.transpose(2, 0, 1, 3).reshape(
+            left_dimension * physical, right_physical * right_dimension)
+
+        try:
+            u, singular_values, vh = scipy.linalg.svd(
+                joint_for_svd, full_matrices=False, lapack_driver='gesdd')
+        except scipy.linalg.LinAlgError:
+            u, singular_values, vh = scipy.linalg.svd(
+                joint_for_svd, full_matrices=False, lapack_driver='gesvd')
+
+        if self.epsrel > 0.0 and singular_values.size > 0:
             threshold = self.epsrel * singular_values[0]
             keep = max(1, int(np.count_nonzero(singular_values > threshold)))
         else:
             keep = singular_values.size
+
         u = u[:, :keep]
         singular_values = singular_values[:keep]
         vh = vh[:keep, :]
+
         if direction == "right":
             self.tensors[site] = u.reshape(left_dimension, physical, keep)
             self.tensors[site + 1] = (
