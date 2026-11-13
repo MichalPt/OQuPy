@@ -67,6 +67,19 @@ class GeneralizedInfluenceTensor:
         Otherwise it has shape ``(D**2, D**2, D**2, D**2)`` with the first
         two axes as output indices and the last two as input indices.
         """
+        generator = self.generator(distance)
+        if distance == 0:
+            return expm(-generator)
+        return expm(-generator.reshape(
+            self._physical_dimension**2,
+            self._physical_dimension**2)).reshape(
+                self._physical_dimension,
+                self._physical_dimension,
+                self._physical_dimension,
+                self._physical_dimension)
+
+    def generator(self, distance: int) -> np.ndarray:
+        """Return the un-exponentiated influence generator."""
         eta = self._eta(distance)
         if distance == 0:
             generator = np.zeros((self._physical_dimension,
@@ -77,7 +90,7 @@ class GeneralizedInfluenceTensor:
                         * commutator_i @ commutator_j
                     generator += 1j * eta[index_i, index_j].imag \
                         * commutator_i @ self._anticommutators[index_j]
-            return expm(-generator)
+            return generator
 
         generator = np.zeros((self._physical_dimension**2,
                               self._physical_dimension**2), dtype=complex)
@@ -88,11 +101,9 @@ class GeneralizedInfluenceTensor:
                 generator += 1j * eta[index_i, index_j].imag \
                     * np.kron(commutator_i,
                               self._anticommutators[index_j])
-        return expm(-generator).reshape(
-            self._physical_dimension,
-            self._physical_dimension,
-            self._physical_dimension,
-            self._physical_dimension)
+        return generator.reshape(
+            self._physical_dimension, self._physical_dimension,
+            self._physical_dimension, self._physical_dimension)
 
 
 class DensePtTempo:
@@ -164,3 +175,21 @@ class DensePtTempo:
 
         times = self._start_time + np.arange(len(states)) * self._parameters.dt
         return Dynamics(times=list(times), states=states)
+class ContinuousInfluenceTensor(GeneralizedInfluenceTensor):
+    """Expose continuous influence generators for TDVP evolution.
+
+    The generalized influence tensor stores ``expm(-G)``.  TDVP requires
+    ``G`` itself, while retaining the same channel ordering and tensor-leg
+    conventions.
+
+    Parameters
+    ----------
+    bath: Bath
+        Bath defining the coupling channels and correlations.
+    parameters: TempoParameters
+        TEMPO discretisation and memory parameters.
+    """
+
+    def generator(self, distance: int) -> np.ndarray:
+        """Return the un-exponentiated influence generator."""
+        return super().generator(distance)

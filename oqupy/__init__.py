@@ -63,6 +63,7 @@ __all__ = [
     'compute_gradient_and_dynamics',
     'Control',
     'Dynamics',
+     'ContinuousInfluenceTensor',
      'DensePtTempo',
      'GeneralizedInfluenceTensor',
     'FileProcessTensor',
@@ -90,6 +91,8 @@ __all__ = [
     'Tempo',
     'tempo_compute',
     'TempoParameters',
+    'TdvpTempo',
+    'TdvpTempoParameters',
      'TransferTensorMap',
     'TimeDependentSystem',
     'TimeDependentSystemWithField',
@@ -118,7 +121,11 @@ from oqupy.bath_correlations import PowerLawSD
 from oqupy.dynamics import Dynamics
 from oqupy.dynamics import MeanFieldDynamics
 
-from oqupy.dense_pt_tempo import DensePtTempo, GeneralizedInfluenceTensor
+from oqupy.dense_pt_tempo import (
+    ContinuousInfluenceTensor,
+    DensePtTempo,
+    GeneralizedInfluenceTensor,
+)
 from oqupy.mps_cross_correlated import MPSPtTempo
 
 from oqupy.gradient import state_gradient
@@ -156,4 +163,5 @@ from oqupy.tempo import MeanFieldTempo
 from oqupy.tempo import guess_tempo_parameters
 from oqupy.tempo import tempo_compute
 from oqupy.tempo import gibbs_tempo_compute
+from oqupy.tdvp_tempo import TdvpTempo, TdvpTempoParameters
 from oqupy.transfer_tensor import TransferTensorMap
