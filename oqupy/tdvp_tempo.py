@@ -12,6 +12,37 @@ from oqupy.tempo import TempoParameters
 from oqupy.backends.tdvp_tempo_backend import TdvpTempoBackend
 
 
+def make_time_grid(start_time: float, end_time: float,
+                   dt_initial: float, dt_max: float,
+                   t_initial: float = 0.0,
+                   growth_factor: float = 1.2) -> np.ndarray:
+    """Construct a smoothly expanding, strictly increasing time grid."""
+    if end_time <= start_time:
+        raise ValueError("end_time must be greater than start_time")
+    if dt_initial <= 0.0 or dt_max < dt_initial:
+        raise ValueError("require 0 < dt_initial <= dt_max")
+    if t_initial < 0.0:
+        raise ValueError("t_initial must be non-negative")
+    if growth_factor <= 1.0:
+        raise ValueError("growth_factor must be greater than one")
+
+    end = float(end_time)
+    transition = min(end, start_time + t_initial)
+    grid = [float(start_time)]
+    current = float(start_time)
+    while current < transition and not np.isclose(current, transition):
+        current += min(dt_initial, transition - current)
+        grid.append(current)
+
+    step = float(dt_initial)
+    while current < end and not np.isclose(current, end):
+        step = min(step * growth_factor, dt_max)
+        current += min(step, end - current)
+        grid.append(current)
+    grid[-1] = end
+    return np.asarray(grid, dtype=float)
+
+
 class TdvpTempoParameters(TempoParameters):
     """Parameters controlling continuous TDVP-TEMPO propagation.
 
@@ -90,9 +121,20 @@ class TdvpTempo(BaseAPIClass):
         self._backend = TdvpTempoBackend(
             system, bath, parameters, state, start_time)
 
-    def compute(self, end_time: float) -> Dynamics:
-        """Compute and return dynamics through ``end_time``."""
-        return self._backend.compute(end_time)
+    def compute(self, end_time: Optional[float] = None,
+                time_grid: Optional[np.ndarray] = None) -> Dynamics:
+        """Compute dynamics on a uniform or explicitly supplied time grid.
+
+        Parameters
+        ----------
+        end_time: float, optional
+            End point for the existing uniform grid.
+        time_grid: numpy.ndarray, optional
+            Strictly increasing absolute time points beginning at
+            ``start_time``.  If supplied, this takes precedence over
+            ``end_time``.
+        """
+        return self._backend.compute(end_time, time_grid)
 
     def get_dynamics(self) -> Optional[Dynamics]:
         """Return the currently computed dynamics, if available."""

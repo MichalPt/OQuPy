@@ -88,9 +88,17 @@ def evolve_two_site(theta: np.ndarray, time: float, left: np.ndarray,
                     second: np.ndarray,
                     traceA: Optional[float] = None) -> np.ndarray:
     """Apply ``exp(time * H_eff)`` without materialising ``H_eff``."""
-    operator = two_site_operator(theta.shape, left, right, first, second)
+    shape = theta.shape
+    mpo_pair = np.einsum("wxis,xyjt->wyijst", first, second)
+
+    def matvec(vector: np.ndarray) -> np.ndarray:
+        tensor = vector.reshape(shape)
+        tmp = np.einsum("awc,cstd->awstd", left, tensor)
+        tmp = np.einsum("wyijst,awstd->ayijd", mpo_pair, tmp)
+        return np.einsum("byd,ayijd->aijb", right, tmp).reshape(-1)
+
     return _arnoldi_expm(
-        operator.matvec, theta.reshape(-1), time).reshape(theta.shape)
+        matvec, theta.reshape(-1), time).reshape(theta.shape)
 
 
 def zero_site_operator(shape: Tuple[int, int], left: np.ndarray,

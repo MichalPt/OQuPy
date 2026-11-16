@@ -93,6 +93,7 @@ __all__ = [
     'TempoParameters',
     'TdvpTempo',
     'TdvpTempoParameters',
+    'make_time_grid',
      'TransferTensorMap',
     'TimeDependentSystem',
     'TimeDependentSystemWithField',
@@ -163,5 +164,6 @@ from oqupy.tempo import MeanFieldTempo
 from oqupy.tempo import guess_tempo_parameters
 from oqupy.tempo import tempo_compute
 from oqupy.tempo import gibbs_tempo_compute
-from oqupy.tdvp_tempo import TdvpTempo, TdvpTempoParameters
+from oqupy.tdvp_tempo import (
+    TdvpTempo, TdvpTempoParameters, make_time_grid)
 from oqupy.transfer_tensor import TransferTensorMap

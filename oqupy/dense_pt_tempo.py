@@ -8,6 +8,7 @@ reference for the compressed PT-TEMPO backend, not as a production solver.
 from typing import List, Optional, Tuple
 
 import numpy as np
+from scipy.integrate import quad
 from scipy.linalg import expm
 
 from oqupy.bath import Bath
@@ -27,6 +28,8 @@ class GeneralizedInfluenceTensor:
         self._eta_cache = {}
         self._generator_cache = {}
         self._gate_cache = {}
+        self._upper_triangle_cache = {}
+        self._interval_eta_cache = {}
         self._commutators = []
         self._anticommutators = []
         identity = np.identity(self._dimension)
@@ -37,6 +40,114 @@ class GeneralizedInfluenceTensor:
             self._anticommutators.append(
                 np.kron(operator, identity) +
                 np.kron(identity, operator.T))
+
+    def _upper_triangle(self, tau: float) -> np.ndarray:
+        """Return the matrix of upper-triangle integrals at ``tau``."""
+        if tau <= 0.0 or np.isclose(tau, 0.0):
+            return np.zeros(
+                (len(self._operators), len(self._operators)), dtype=complex)
+        key = round(float(tau), 14)
+        if key not in self._upper_triangle_cache:
+            self._upper_triangle_cache[key] = np.array([
+                [correlation.correlation_2d_integral(
+                    delta=key, time_1=0.0, time_2=None,
+                    shape="upper-triangle")
+                 for correlation in row]
+                for row in self._bath.correlations_matrix],
+                dtype=complex)
+        return self._upper_triangle_cache[key]
+
+    def eta_interval(self, t_k0: float, t_k1: float,
+                     t_m0: Optional[float] = None,
+                     t_m1: Optional[float] = None) -> np.ndarray:
+        """Return the influence integral for one interval pair."""
+        if t_m0 is None or t_m1 is None:
+            return self._upper_triangle(t_k1 - t_k0)
+        if np.isclose(t_k0, t_m0) and np.isclose(t_k1, t_m1):
+            return self._upper_triangle(t_k1 - t_k0)
+        if t_k0 >= t_m1:
+            widths = (round(t_k1 - t_k0, 12),
+                      round(t_m1 - t_m0, 12),
+                      round(t_k0 - t_m0, 12))
+            if widths not in self._interval_eta_cache:
+                values = []
+                for row in self._bath.correlations_matrix:
+                    value_row = []
+                    for correlation in row:
+                        function = getattr(correlation, "correlation", None)
+                        if not callable(function):
+                            value_row = []
+                            break
+                        a = t_k0 - t_m1
+                        d = t_k1 - t_m0
+                        b = min(t_k0 - t_m0, t_k1 - t_m1)
+                        c = max(t_k0 - t_m0, t_k1 - t_m1)
+                        points = [point for point in (b, c)
+                                  if a < point < d]
+                        real = quad(
+                            lambda s: np.real(function(s) * (
+                                min(t_k1, t_m1 + s)
+                                - max(t_k0, t_m0 + s))),
+                            a, d, points=points)[0]
+                        imag = quad(
+                            lambda s: np.imag(function(s) * (
+                                min(t_k1, t_m1 + s)
+                                - max(t_k0, t_m0 + s))),
+                            a, d, points=points)[0]
+                        value_row.append(real + 1j * imag)
+                    if not value_row:
+                        values = []
+                        break
+                    values.append(value_row)
+                if values:
+                    self._interval_eta_cache[widths] = np.asarray(
+                        values, dtype=complex)
+            if widths in self._interval_eta_cache:
+                return self._interval_eta_cache[widths]
+        return (self._upper_triangle(t_k1 - t_m0)
+                - self._upper_triangle(t_k0 - t_m0)
+                - self._upper_triangle(t_k1 - t_m1)
+                + self._upper_triangle(t_k0 - t_m1))
+
+    def _generator_from_eta(self, eta: np.ndarray,
+                            distance: int) -> np.ndarray:
+        if distance == 0:
+            generator = np.zeros(
+                (self._physical_dimension, self._physical_dimension),
+                dtype=complex)
+            for index_i, commutator_i in enumerate(self._commutators):
+                for index_j, commutator_j in enumerate(self._commutators):
+                    generator += eta[index_i, index_j].real \
+                        * commutator_i @ commutator_j
+                    generator += 1j * eta[index_i, index_j].imag \
+                        * commutator_i @ self._anticommutators[index_j]
+            return generator
+        generator = np.zeros(
+            (self._physical_dimension**2, self._physical_dimension**2),
+            dtype=complex)
+        for index_i, commutator_i in enumerate(self._commutators):
+            for index_j, commutator_j in enumerate(self._commutators):
+                generator += eta[index_i, index_j].real \
+                    * np.kron(commutator_i, commutator_j)
+                generator += 1j * eta[index_i, index_j].imag \
+                    * np.kron(commutator_i,
+                              self._anticommutators[index_j])
+        return generator.reshape(
+            self._physical_dimension, self._physical_dimension,
+            self._physical_dimension, self._physical_dimension)
+
+    def generator_interval(self, t_k0: float, t_k1: float,
+                           t_m0: Optional[float] = None,
+                           t_m1: Optional[float] = None) -> np.ndarray:
+        """Return the continuous generator for an interval pair."""
+        distance = 0 if t_m0 is None or t_m1 is None else 1
+        return self._generator_from_eta(
+            self.eta_interval(t_k0, t_k1, t_m0, t_m1), distance)
+
+    def gate_interval(self, t_k0: float, t_k1: float) -> np.ndarray:
+        """Return the influence gate for one non-uniform interval."""
+        generator = self.generator_interval(t_k0, t_k1)
+        return expm(-generator)
 
     @property
     def physical_dimension(self) -> int:
@@ -94,31 +205,7 @@ class GeneralizedInfluenceTensor:
         """Return the un-exponentiated influence generator."""
         if distance in self._generator_cache:
             return self._generator_cache[distance]
-        eta = self._eta(distance)
-        if distance == 0:
-            generator = np.zeros((self._physical_dimension,
-                                  self._physical_dimension), dtype=complex)
-            for index_i, commutator_i in enumerate(self._commutators):
-                for index_j, commutator_j in enumerate(self._commutators):
-                    generator += eta[index_i, index_j].real \
-                        * commutator_i @ commutator_j
-                    generator += 1j * eta[index_i, index_j].imag \
-                        * commutator_i @ self._anticommutators[index_j]
-            self._generator_cache[distance] = generator
-            return generator
-
-        generator = np.zeros((self._physical_dimension**2,
-                              self._physical_dimension**2), dtype=complex)
-        for index_i, commutator_i in enumerate(self._commutators):
-            for index_j, commutator_j in enumerate(self._commutators):
-                generator += eta[index_i, index_j].real \
-                    * np.kron(commutator_i, commutator_j)
-                generator += 1j * eta[index_i, index_j].imag \
-                    * np.kron(commutator_i,
-                              self._anticommutators[index_j])
-        generator = generator.reshape(
-            self._physical_dimension, self._physical_dimension,
-            self._physical_dimension, self._physical_dimension)
+        generator = self._generator_from_eta(self._eta(distance), distance)
         self._generator_cache[distance] = generator
         return generator
 
