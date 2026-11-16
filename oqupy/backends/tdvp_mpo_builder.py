@@ -10,7 +10,8 @@ def build_memory_mpo(
         length: int,
         physical_dimension: int,
         max_bond_dimension: Optional[int] = None,
-        tolerance: float = 0.0) -> List[np.ndarray]:
+        tolerance: float = 0.0,
+        active_site: Optional[int] = None) -> List[np.ndarray]:
     """Build an MPO for a finite sum of pairwise memory generators.
 
     ``generators[d]`` is the two-site generator at distance ``d`` and has
@@ -51,7 +52,7 @@ def build_memory_mpo(
             raise ValueError(
                 "A two-site generator must have shape "
                 f"({p}, {p}, {p}, {p})")
-        matrix = array.reshape(p * p, p * p)
+        matrix = array.transpose(1, 3, 0, 2).reshape(p * p, p * p)
         left, singular, right = np.linalg.svd(matrix, full_matrices=False)
         cutoff = tolerance * singular[0] if singular.size else 0.0
         keep = int(np.count_nonzero(singular > cutoff))
@@ -63,19 +64,30 @@ def build_memory_mpo(
         for rank in range(keep):
             left_op = left[:, rank].reshape(p, p) * singular[rank]
             right_op = right[rank, :].reshape(p, p)
-            for first in range(length - distance):
+            if active_site is None:
+                first_sites = range(length - distance)
+            elif active_site >= distance:
+                first_sites = (active_site - distance,)
+            else:
+                first_sites = ()
+            for first in first_sites:
                 paths.append((first, first + distance, left_op, right_op))
 
-    # One identity path and one path per pair term.  The off-diagonal entries
-    # route a term through the finite-state bond space.
-    bond = 1 + len(paths)
+    # The zero state and final state propagate identity operators.  Each
+    # finite-state path enters from the initial state and exits into the
+    # final state, producing a sum of pair terms.
+    bond = 2 + len(paths)
     mpo = [np.zeros((bond, bond, p, p), dtype=complex)
            for _ in range(length)]
-    for site in range(length):
-        mpo[site][0, 0] = identity
-    for path_index, (first, second, left_op, right_op) in enumerate(paths, 1):
+    for tensor in mpo:
+        tensor[0, 0] = identity
+        tensor[1, 1] = identity
+
+    for path_index, (first, second, left_op, right_op) in enumerate(paths, 2):
         mpo[first][0, path_index] = left_op
-        mpo[second][path_index, 0] = right_op
+        for site in range(first + 1, second):
+            mpo[site][path_index, path_index] = identity
+        mpo[second][path_index, 1] = right_op
     return mpo
 
 

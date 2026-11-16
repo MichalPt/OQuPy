@@ -24,6 +24,9 @@ class GeneralizedInfluenceTensor:
         self._dimension = bath.dimension
         self._physical_dimension = self._dimension**2
         self._operators = bath.coupling_operators
+        self._eta_cache = {}
+        self._generator_cache = {}
+        self._gate_cache = {}
         self._commutators = []
         self._anticommutators = []
         identity = np.identity(self._dimension)
@@ -41,6 +44,8 @@ class GeneralizedInfluenceTensor:
         return self._physical_dimension
 
     def _eta(self, distance: int) -> np.ndarray:
+        if distance in self._eta_cache:
+            return self._eta_cache[distance]
         if distance == 0:
             shape = "upper-triangle"
             time_1 = 0.0
@@ -49,7 +54,7 @@ class GeneralizedInfluenceTensor:
             shape = "square"
             time_1 = distance * self._parameters.dt
             time_2 = None
-        return np.array([
+        eta = np.array([
             [correlation.correlation_2d_integral(
                 delta=self._parameters.dt,
                 time_1=time_1,
@@ -59,6 +64,8 @@ class GeneralizedInfluenceTensor:
             for row in self._bath.correlations_matrix],
             dtype=complex,
         )
+        self._eta_cache[distance] = eta
+        return eta
 
     def gate(self, distance: int) -> np.ndarray:
         """Return a one-site or two-site influence gate.
@@ -67,19 +74,26 @@ class GeneralizedInfluenceTensor:
         Otherwise it has shape ``(D**2, D**2, D**2, D**2)`` with the first
         two axes as output indices and the last two as input indices.
         """
+        if distance in self._gate_cache:
+            return self._gate_cache[distance]
         generator = self.generator(distance)
         if distance == 0:
-            return expm(-generator)
-        return expm(-generator.reshape(
+            gate = expm(-generator)
+        else:
+            gate = expm(-generator.reshape(
             self._physical_dimension**2,
             self._physical_dimension**2)).reshape(
                 self._physical_dimension,
                 self._physical_dimension,
                 self._physical_dimension,
                 self._physical_dimension)
+        self._gate_cache[distance] = gate
+        return gate
 
     def generator(self, distance: int) -> np.ndarray:
         """Return the un-exponentiated influence generator."""
+        if distance in self._generator_cache:
+            return self._generator_cache[distance]
         eta = self._eta(distance)
         if distance == 0:
             generator = np.zeros((self._physical_dimension,
@@ -90,6 +104,7 @@ class GeneralizedInfluenceTensor:
                         * commutator_i @ commutator_j
                     generator += 1j * eta[index_i, index_j].imag \
                         * commutator_i @ self._anticommutators[index_j]
+            self._generator_cache[distance] = generator
             return generator
 
         generator = np.zeros((self._physical_dimension**2,
@@ -101,9 +116,11 @@ class GeneralizedInfluenceTensor:
                 generator += 1j * eta[index_i, index_j].imag \
                     * np.kron(commutator_i,
                               self._anticommutators[index_j])
-        return generator.reshape(
+        generator = generator.reshape(
             self._physical_dimension, self._physical_dimension,
             self._physical_dimension, self._physical_dimension)
+        self._generator_cache[distance] = generator
+        return generator
 
 
 class DensePtTempo:
@@ -151,27 +168,35 @@ class DensePtTempo:
         propagators = self._system.get_propagators(
             self._parameters.dt, self._start_time, None, None)
         influence = GeneralizedInfluenceTensor(self._bath, self._parameters)
-        history = self._initial_state.reshape(self._bath.dimension**2)
+        history = None
         states = [self._initial_state.copy()]
+        previous_second_half = None
 
         for step in range(num_steps):
             first_half, second_half = propagators(step)
-            history = np.einsum("...a,ba->...ab", history, first_half)
-            history = self._apply_one_site(
-                history, step + 1, influence.gate(0))
-            memory = min(step + 1, self._parameters.dkmax)
-            for distance in range(1, memory + 1):
-                history = self._apply_two_site(
-                    history,
-                    step + 1,
-                    step + 1 - distance,
-                    influence.gate(distance),
-                )
-            history = self._apply_one_site(
-                history, step + 1, second_half)
-            state = history.sum(axis=tuple(range(history.ndim - 1)))
+            if step == 0:
+                history = first_half @ self._initial_state.reshape(-1)
+                history = self._apply_one_site(
+                    history, 0, influence.gate(0))
+            else:
+                history = np.einsum(
+                    "...a,ba->...ab",
+                    history, first_half @ previous_second_half)
+                newest = step
+                history = self._apply_one_site(
+                    history, newest, influence.gate(0))
+                memory = min(step, self._parameters.dkmax)
+                for distance in range(1, memory + 1):
+                    history = self._apply_two_site(
+                        history,
+                        newest - distance,
+                        newest,
+                        influence.gate(distance))
+            readout = self._apply_one_site(history, step, second_half)
+            state = readout.sum(axis=tuple(range(readout.ndim - 1)))
             state = state.reshape(self._bath.dimension, self._bath.dimension)
             states.append(state)
+            previous_second_half = second_half
 
         times = self._start_time + np.arange(len(states)) * self._parameters.dt
         return Dynamics(times=list(times), states=states)
@@ -189,6 +214,28 @@ class ContinuousInfluenceTensor(GeneralizedInfluenceTensor):
     parameters: TempoParameters
         TEMPO discretisation and memory parameters.
     """
+
+    def _eta(self, distance: int) -> np.ndarray:
+        if distance in self._eta_cache:
+            return self._eta_cache[distance]
+        if getattr(self._bath, "correlations_matrix", None) is not None:
+            return super()._eta(distance)
+        if distance == 0:
+            shape = "upper-triangle"
+            time_1 = 0.0
+            time_2 = None
+        else:
+            shape = "square"
+            time_1 = distance * self._parameters.dt
+            time_2 = None
+        eta = self._bath.correlations.correlation_2d_integral(
+            delta=self._parameters.dt,
+            time_1=time_1,
+            time_2=time_2,
+            shape=shape)
+        result = np.array([[eta]], dtype=complex)
+        self._eta_cache[distance] = result
+        return result
 
     def generator(self, distance: int) -> np.ndarray:
         """Return the un-exponentiated influence generator."""

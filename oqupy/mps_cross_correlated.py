@@ -15,9 +15,11 @@ from oqupy.util import get_progress
 class CrossCorrelatedMPS:
     """MPS with adjacent-gate SVD compression and exact SWAP routing."""
 
-    def __init__(self, physical_dimension: int, epsrel: float):
+    def __init__(self, physical_dimension: int, epsrel: float,
+                 max_bond_dimension: Optional[int] = None):
         self.physical_dimension = physical_dimension
         self.epsrel = epsrel
+        self.max_bond_dimension = max_bond_dimension
         self.tensors = []
 
     def append_propagated_site(self, propagator):
@@ -77,6 +79,8 @@ class CrossCorrelatedMPS:
             keep = max(1, int(np.count_nonzero(singular_values > threshold)))
         else:
             keep = singular_values.size
+        if self.max_bond_dimension is not None:
+            keep = min(keep, self.max_bond_dimension)
 
         u = u[:, :keep]
         singular_values = singular_values[:keep]
@@ -160,23 +164,32 @@ class MPSPtTempo:
             self.parameters.dt, self.start_time, None, None)
         influence = GeneralizedInfluenceTensor(self.bath, self.parameters)
         mps = CrossCorrelatedMPS(physical_dimension, self.parameters.epsrel)
-        mps.tensors = [self.initial_state.reshape(1, physical_dimension, 1)]
         trace_vector = np.eye(dimension, dtype=complex).reshape(-1)
         states = [self.initial_state.copy()]
+        previous_second_half = None
         progress = get_progress(progress_type)(self.max_steps,
                                                 "MPS TEMPO propagation:")
         with progress as progress_bar:
             for step in range(self.max_steps):
                 first_half, second_half = propagators(step)
-                mps.append_propagated_site(first_half)
-                newest = len(mps.tensors) - 1
-                mps.apply_one_site(newest, influence.gate(0))
-                for older in range(max(0, newest - self.memory_cutoff), newest):
-                    mps.apply_nonlocal_gate(older, newest,
-                                            influence.gate(newest - older))
-                mps.apply_one_site(newest, second_half)
-                state = mps.state_at_last_site(trace_vector)
+                if step == 0:
+                    mps.tensors = [
+                        (first_half @ self.initial_state.reshape(-1))
+                        .reshape(1, physical_dimension, 1)]
+                    mps.apply_one_site(0, influence.gate(0))
+                else:
+                    mps.append_propagated_site(
+                        first_half @ previous_second_half)
+                    newest = len(mps.tensors) - 1
+                    mps.apply_one_site(newest, influence.gate(0))
+                    for older in range(
+                            max(0, newest - self.memory_cutoff), newest):
+                        mps.apply_nonlocal_gate(
+                            older, newest,
+                            influence.gate(newest - older))
+                state = second_half @ mps.state_at_last_site(trace_vector)
                 states.append(state.reshape(dimension, dimension))
+                previous_second_half = second_half
                 progress_bar.update(step + 1)
         times = self.start_time + np.arange(len(states)) * self.parameters.dt
         return Dynamics(times=list(times), states=states)
