@@ -31,6 +31,32 @@ def _split(theta: np.ndarray, epsrel: float,
     )
 
 
+def _right_canonicalize(tensors, epsrel: float,
+                        max_bond_dimension: Optional[int]) -> None:
+    """Canonicalize all sites except the left boundary from right to left."""
+    for index in range(len(tensors) - 1, 0, -1):
+        tensor = tensors[index]
+        left_dimension, physical, right_dimension = tensor.shape
+        matrix = tensor.reshape(left_dimension, physical * right_dimension)
+        u, singular, vh = scipy.linalg.svd(matrix, full_matrices=False)
+        if epsrel > 0.0 and singular.size:
+            keep = max(1, int(np.count_nonzero(
+                singular > epsrel * singular[0])))
+        else:
+            keep = singular.size
+        if max_bond_dimension is not None:
+            keep = min(keep, max_bond_dimension)
+        u = u[:, :keep]
+        singular = singular[:keep]
+        vh = vh[:keep]
+        tensors[index] = vh.reshape(keep, physical, right_dimension)
+        tensors[index - 1] = np.einsum(
+            "lpr,rk->lpk",
+            tensors[index - 1],
+            u * singular[None, :],
+            optimize=True)
+
+
 class TdvpTempoBackend:
     """Execute adaptive two-site TDVP using a finite-memory MPO."""
 
@@ -95,6 +121,23 @@ class TdvpTempoBackend:
                     first_half @ previous_second_half)
                 length = len(mps.tensors)
                 mps.apply_one_site(length - 1, influence.gate(0))
+                while len(mps.tensors) > self.parameters.dkmax + 1:
+                    boundary = np.einsum(
+                        "lpr,p->lr",
+                        mps.tensors[0],
+                        np.ones(physical, dtype=complex),
+                        optimize=True)
+                    mps.tensors[1] = np.einsum(
+                        "lr,rps->lps",
+                        boundary,
+                        mps.tensors[1],
+                        optimize=True)
+                    mps.tensors.pop(0)
+                length = len(mps.tensors)
+                _right_canonicalize(
+                    mps.tensors,
+                    self.parameters.epsrel,
+                    self.parameters.max_bond_dimension)
                 generators = {
                     distance: -influence.generator(distance) /
                     self.parameters.dt

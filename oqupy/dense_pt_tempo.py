@@ -189,8 +189,8 @@ class DensePtTempo:
                 for distance in range(1, memory + 1):
                     history = self._apply_two_site(
                         history,
-                        newest - distance,
                         newest,
+                        newest - distance,
                         influence.gate(distance))
             readout = self._apply_one_site(history, step, second_half)
             state = readout.sum(axis=tuple(range(readout.ndim - 1)))

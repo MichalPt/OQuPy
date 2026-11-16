@@ -76,15 +76,24 @@ class Bath(BaseAPIClass):
         self._original_coupling_operators = [operator.copy()
                                              for operator in operators]
 
-        # diagonalise the coupling operator
-        if len(operators) == 1 and np.allclose(
+        # Find a shared eigenbasis for mutually commuting channels.  Refining
+        # degenerate eigenspaces is necessary when the first operator alone
+        # does not determine the physical basis.
+        self._commuting_channels = all(
+            np.allclose(operators[i] @ operators[j],
+                        operators[j] @ operators[i])
+            for i in range(len(operators))
+            for j in range(i))
+        if self._commuting_channels and len(operators) == 1 and np.allclose(
                 np.diag(operators[0].diagonal()), operators[0]):
             v = np.identity(self._dimension)
+        elif self._commuting_channels:
+            v = _simultaneous_eigenbasis(operators)
         else:
-            _, v = np.linalg.eigh(operators[0])
+            v = np.identity(self._dimension)
         diagonal_operators = [v.conjugate().T @ operator @ v
                               for operator in operators]
-        self._commuting_channels = all(
+        self._commuting_channels = self._commuting_channels and all(
             np.allclose(operator, np.diag(operator.diagonal()))
             for operator in diagonal_operators)
         if self._commuting_channels:
@@ -215,3 +224,28 @@ def _row_degeneracy(matrix):
     mat = np.array(matrix).round(decimals=DEFAULT_TOLERANCE_DEGENERACY)
     return_map = np.unique(mat.T,return_inverse=True,axis=0)[1]
     return return_map
+
+
+def _simultaneous_eigenbasis(operators):
+    """Return a common eigenbasis for a list of commuting Hermitian matrices."""
+    _, basis = np.linalg.eigh(operators[0])
+    transformed = [
+        basis.conjugate().T @ operator @ basis for operator in operators]
+
+    for operator_index in range(1, len(operators)):
+        keys = [
+            tuple(np.round(transformed[index][index].real, 12)
+                  for transformed in transformed[:operator_index])
+            for index in range(basis.shape[0])]
+        rotation = np.eye(basis.shape[0], dtype=complex)
+        for key in set(keys):
+            indices = [index for index, value in enumerate(keys)
+                       if value == key]
+            block = transformed[operator_index][np.ix_(indices, indices)]
+            _, eigenvectors = np.linalg.eigh(block)
+            rotation[np.ix_(indices, indices)] = eigenvectors
+        basis = basis @ rotation
+        transformed = [
+            basis.conjugate().T @ operator @ basis
+            for operator in operators]
+    return basis

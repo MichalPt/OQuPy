@@ -43,6 +43,56 @@ def build_memory_mpo(
 
     p = physical_dimension
     identity = np.eye(p, dtype=complex)
+    if active_site is not None:
+        if active_site < 0 or active_site >= length:
+            raise ValueError("active_site must be a valid site index")
+        valid_distances = [
+            distance for distance in sorted(generators)
+            if 1 <= distance < length and active_site >= distance]
+        bond = 2
+        if valid_distances:
+            matrices = []
+            for distance in valid_distances:
+                array = np.asarray(generators[distance], dtype=complex)
+                if array.shape != (p, p, p, p):
+                    raise ValueError(
+                        "A two-site generator must have shape "
+                        f"({p}, {p}, {p}, {p})")
+                matrices.append(array.transpose(1, 3, 0, 2).reshape(
+                    p * p, p * p))
+            stacked = np.vstack(matrices)
+            left, singular, right = np.linalg.svd(
+                stacked, full_matrices=False)
+            cutoff = tolerance * singular[0] if singular.size else 0.0
+            keep = int(np.count_nonzero(singular > cutoff))
+            keep = max(1, keep)
+            if max_bond_dimension is not None:
+                if max_bond_dimension < 1:
+                    raise ValueError("max_bond_dimension must be positive")
+                keep = min(keep, max_bond_dimension)
+            bond += keep
+
+        mpo = [np.zeros((bond, bond, p, p), dtype=complex)
+               for _ in range(length)]
+        for tensor in mpo:
+            tensor[0, 0] = identity
+            tensor[1, 1] = identity
+        if not valid_distances:
+            return mpo
+
+        min_first = active_site - max(valid_distances)
+        for rank in range(keep):
+            path_index = 2 + rank
+            mpo[active_site][path_index, 1] = right[rank, :].reshape(p, p)
+            for site in range(min_first + 1, active_site):
+                mpo[site][path_index, path_index] = identity
+            for index, distance in enumerate(valid_distances):
+                first = active_site - distance
+                block = (left[index * p * p:(index + 1) * p * p, rank]
+                         * singular[rank])
+                mpo[first][0, path_index] = block.reshape(p, p)
+        return mpo
+
     paths = []
     for distance, generator in generators.items():
         if distance < 1 or distance >= length:

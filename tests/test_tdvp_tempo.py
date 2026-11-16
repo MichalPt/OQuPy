@@ -93,3 +93,30 @@ def test_tdvp_numerical_correlations_match_original_tempo():
         start_time=0.0).compute(0.2)
 
     assert np.max(np.abs(tdvp.states - tempo.states)) < 1e-10
+
+
+def test_tdvp_multichannel_commuting_bath_in_nondiagonal_basis():
+    correlation = oqupy.CustomCorrelations(
+        lambda tau: 0.02 * np.exp(-tau))
+    bath = oqupy.Bath(
+        [oqupy.operators.sigma("x"),
+         0.5 * oqupy.operators.sigma("x")],
+        [[correlation, correlation], [correlation, correlation]])
+
+    assert bath.commuting_channels
+    assert np.allclose(
+        bath.coupling_operators[0],
+        np.diag(np.diag(bath.coupling_operators[0])))
+    assert np.allclose(
+        bath.coupling_operators[1],
+        np.diag(np.diag(bath.coupling_operators[1])))
+    assert not np.allclose(bath.unitary_transform, np.eye(2))
+
+    system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
+    initial_state = oqupy.operators.spin_dm("z+")
+    parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-10, dkmax=2, max_bond_dimension=32)
+    dynamics = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(0.2)
+
+    assert np.all(np.isfinite(dynamics.states))
