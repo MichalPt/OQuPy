@@ -33,29 +33,20 @@ def _split(theta: np.ndarray, epsrel: float,
     )
 
 
-def _right_canonicalize(tensors, epsrel: float,
-                        max_bond_dimension: Optional[int]) -> None:
-    """Canonicalize all sites except the left boundary from right to left."""
+def _right_canonicalize(tensors, epsrel: float = 0.0,
+                        max_bond_dimension: Optional[int] = None) -> None:
+    """Losslessly right-canonicalize all sites except the left boundary."""
     for index in range(len(tensors) - 1, 0, -1):
         tensor = tensors[index]
         left_dimension, physical, right_dimension = tensor.shape
         matrix = tensor.reshape(left_dimension, physical * right_dimension)
-        u, singular, vh = scipy.linalg.svd(matrix, full_matrices=False)
-        if epsrel > 0.0 and singular.size:
-            keep = max(1, int(np.count_nonzero(
-                singular > epsrel * singular[0])))
-        else:
-            keep = singular.size
-        if max_bond_dimension is not None:
-            keep = min(keep, max_bond_dimension)
-        u = u[:, :keep]
-        singular = singular[:keep]
-        vh = vh[:keep]
-        tensors[index] = vh.reshape(keep, physical, right_dimension)
+        r_mat, q_mat = scipy.linalg.rq(matrix, mode="economic")
+        keep = q_mat.shape[0]
+        tensors[index] = q_mat.reshape(keep, physical, right_dimension)
         tensors[index - 1] = np.einsum(
             "lpr,rk->lpk",
             tensors[index - 1],
-            u * singular[None, :])
+            r_mat)
 
 
 class TdvpTempoBackend:

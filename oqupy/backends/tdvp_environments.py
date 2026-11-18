@@ -29,16 +29,16 @@ class TdvpEnvironments:
     @staticmethod
     def _left_step(block: np.ndarray, tensor: np.ndarray,
                    operator: np.ndarray) -> np.ndarray:
-        tmp = np.einsum("awb,asi->wbsi", block, tensor)
-        tmp = np.einsum("wbsi,wxts->bxti", tmp, operator)
-        return np.einsum("bxti,btj->ixj", tmp, tensor.conj())
+        tmp = np.einsum("awb,bsj->wasj", block, tensor)
+        tmp = np.einsum("wasj,wxts->axtj", tmp, operator)
+        return np.einsum("axtj,ati->ixj", tmp, tensor.conj())
 
     @staticmethod
     def _right_step(block: np.ndarray, tensor: np.ndarray,
                     operator: np.ndarray) -> np.ndarray:
-        tmp = np.einsum("asi,ixj->asxj", tensor, block)
-        tmp = np.einsum("asxj,wxts->awtj", tmp, operator)
-        return np.einsum("awtj,btj->awb", tmp, tensor.conj())
+        tmp = np.einsum("bsj,ixj->bsxi", tensor, block)
+        tmp = np.einsum("bsxi,wxts->bwti", tmp, operator)
+        return np.einsum("bwti,ati->awb", tmp, tensor.conj())
 
     def build_right(self) -> None:
         """Build all right environments from right to left."""

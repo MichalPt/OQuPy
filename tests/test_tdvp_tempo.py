@@ -214,3 +214,43 @@ def test_tdvp_tcut_without_dkmax():
     dynamics = oqupy.TdvpTempo(
         system, bath, parameters, oqupy.operators.spin_dm("z+")).compute(0.3)
     assert np.all(np.isfinite(dynamics.states))
+
+
+def test_tdvp_eight_steps_matches_tempo():
+    correlations = oqupy.CustomCorrelations(
+        lambda tau: 0.02 * np.exp(-tau))
+    bath = oqupy.Bath(0.5 * oqupy.operators.sigma("z"), correlations)
+    system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
+    initial_state = oqupy.operators.spin_dm("z+")
+    tdvp_parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-10, dkmax=8, max_bond_dimension=32)
+    tempo_parameters = oqupy.TempoParameters(
+        dt=0.1, epsrel=1e-10, dkmax=8)
+
+    tdvp = oqupy.TdvpTempo(
+        system, bath, tdvp_parameters, initial_state).compute(
+            0.8, progress_type="silent")
+    tempo = oqupy.Tempo(
+        system, bath, tempo_parameters, initial_state, 0.0).compute(0.8)
+
+    assert np.max(np.abs(tdvp.states - tempo.states)) < 1e-10
+
+
+def test_tdvp_eight_steps_matches_cross_correlated_references():
+    bath = _cross_correlated_bath()
+    system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
+    initial_state = oqupy.operators.spin_dm("z+")
+    parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-10, dkmax=8, max_bond_dimension=32)
+
+    tdvp = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(
+            0.8, progress_type="silent")
+    dense = oqupy.DensePtTempo(
+        system, bath, parameters, initial_state, max_steps=8).compute()
+    mps = oqupy.MPSPtTempo(
+        system, bath, parameters, initial_state, max_steps=8).compute(
+            progress_type="silent")
+
+    assert np.max(np.abs(tdvp.states - dense.states)) < 1e-8
+    assert np.max(np.abs(tdvp.states - mps.states)) < 1e-8
