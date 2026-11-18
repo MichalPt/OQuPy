@@ -177,3 +177,40 @@ def test_tdvp_variable_grid_improves_coarse_grid_accuracy():
     fine_error = np.max(np.abs(variable.states[-1] - fine.states[-1]))
     coarse_error = np.max(np.abs(coarse.states[-1] - fine.states[-1]))
     assert fine_error < coarse_error
+
+
+def test_tdvp_one_site_and_incremental_resume():
+    correlations = oqupy.CustomCorrelations(
+        lambda tau: 0.02 * np.exp(-tau))
+    bath = oqupy.Bath(0.5 * oqupy.operators.sigma("x"), correlations)
+    system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
+    initial_state = oqupy.operators.spin_dm("z+")
+    parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-8, dkmax=3, max_bond_dimension=8,
+        tdvp_method="1-site")
+    dynamics = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(0.3)
+    assert np.all(np.isfinite(dynamics.states))
+
+    reference_parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-8, dkmax=3, max_bond_dimension=16)
+    reference = oqupy.TdvpTempo(
+        system, bath, reference_parameters, initial_state).compute(0.3)
+    resumed = oqupy.TdvpTempo(
+        system, bath, reference_parameters, initial_state)
+    resumed._backend.compute_step()
+    resumed._backend.compute_step()
+    result = resumed.compute(0.3)
+    assert np.max(np.abs(reference.states - result.states)) < 1e-14
+
+
+def test_tdvp_tcut_without_dkmax():
+    correlations = oqupy.CustomCorrelations(
+        lambda tau: 0.02 * np.exp(-tau))
+    bath = oqupy.Bath(0.5 * oqupy.operators.sigma("x"), correlations)
+    system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
+    parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-8, tcut=0.25, max_bond_dimension=8)
+    dynamics = oqupy.TdvpTempo(
+        system, bath, parameters, oqupy.operators.spin_dm("z+")).compute(0.3)
+    assert np.all(np.isfinite(dynamics.states))

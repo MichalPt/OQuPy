@@ -112,8 +112,8 @@ class TdvpTempo(BaseAPIClass):
             raise TypeError("parameters must be TdvpTempoParameters")
         if not isinstance(bath, Bath):
             raise TypeError("bath must be a Bath instance")
-        if parameters.dkmax is None:
-            raise ValueError("TdvpTempo requires an explicit dkmax")
+        if parameters.dkmax is None and parameters.tcut is None:
+            raise ValueError("TdvpTempo requires dkmax or tcut")
         state = np.asarray(initial_state, dtype=complex)
         if state.shape != (system.dimension, system.dimension):
             raise ValueError("initial_state has incompatible system dimension")
@@ -122,7 +122,8 @@ class TdvpTempo(BaseAPIClass):
             system, bath, parameters, state, start_time)
 
     def compute(self, end_time: Optional[float] = None,
-                time_grid: Optional[np.ndarray] = None) -> Dynamics:
+                time_grid: Optional[np.ndarray] = None,
+                progress_type: Optional[str] = None) -> Dynamics:
         """Compute dynamics on a uniform or explicitly supplied time grid.
 
         Parameters
@@ -133,8 +134,10 @@ class TdvpTempo(BaseAPIClass):
             Strictly increasing absolute time points beginning at
             ``start_time``.  If supplied, this takes precedence over
             ``end_time``.
+        progress_type: str, optional
+            Progress-bar type passed to :func:`oqupy.util.get_progress`.
         """
-        return self._backend.compute(end_time, time_grid)
+        return self._backend.compute(end_time, time_grid, progress_type)
 
     def get_dynamics(self) -> Optional[Dynamics]:
         """Return the currently computed dynamics, if available."""

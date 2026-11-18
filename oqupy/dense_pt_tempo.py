@@ -8,12 +8,35 @@ reference for the compressed PT-TEMPO backend, not as a production solver.
 from typing import List, Optional, Tuple
 
 import numpy as np
-from scipy.integrate import quad
+from scipy.interpolate import CubicSpline
 from scipy.linalg import expm
 
 from oqupy.bath import Bath
 from oqupy.dynamics import Dynamics
 from oqupy.tempo import TempoParameters
+
+_GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(16)
+
+
+def _integrate_tent_1d(func, a, b, c, d, t_k0, t_k1, t_m0, t_m1):
+    result = 0.0j
+    for x0, x1 in ((a, b), (b, c), (c, d)):
+        if x1 - x0 <= 1.0e-15:
+            continue
+        samples = (0.5 * (x1 - x0) * _GL_NODES
+                   + 0.5 * (x0 + x1))
+        weights = 0.5 * (x1 - x0) * _GL_WEIGHTS
+        try:
+            values = np.asarray(func(samples), dtype=complex)
+            if values.shape != samples.shape:
+                raise TypeError
+        except (TypeError, ValueError):
+            values = np.array([func(float(sample)) for sample in samples],
+                              dtype=complex)
+        tent = (np.minimum(t_k1, t_m1 + samples)
+                - np.maximum(t_k0, t_m0 + samples))
+        result += np.dot(weights, values * tent)
+    return result
 
 
 class GeneralizedInfluenceTensor:
@@ -30,6 +53,7 @@ class GeneralizedInfluenceTensor:
         self._gate_cache = {}
         self._upper_triangle_cache = {}
         self._interval_eta_cache = {}
+        self._correlation_splines = {}
         self._commutators = []
         self._anticommutators = []
         identity = np.identity(self._dimension)
@@ -41,6 +65,45 @@ class GeneralizedInfluenceTensor:
                 np.kron(operator, identity) +
                 np.kron(identity, operator.T))
 
+    @staticmethod
+    def _channel_key(correlation):
+        """Return a stable key for equivalent correlation channels."""
+        for attribute in ("correlation_function", "j_function"):
+            function = getattr(correlation, attribute, None)
+            if function is not None:
+                function = getattr(function, "pyfunc", function)
+                return (attribute, id(function))
+        function = getattr(correlation, "correlation", None)
+        owner = getattr(function, "__self__", None)
+        if owner is not None:
+            return ("correlation", id(owner))
+        j_function = getattr(correlation, "j_function", None)
+        if j_function is not None:
+            return ("j_function", id(j_function))
+        return ("correlation", id(function), id(correlation))
+
+    def _interpolated_correlation(self, correlation, max_tau: float):
+        """Return a cached vectorized spline for a scalar correlation."""
+        key = self._channel_key(correlation)
+        cached = self._correlation_splines.get(key)
+        if cached is not None and max_tau <= cached[0]:
+            return cached[1]
+        function = getattr(correlation, "correlation", None)
+        if not callable(function):
+            return None
+        max_tau = max(float(max_tau), np.finfo(float).eps)
+        grid = np.linspace(0.0, max_tau, 513)
+        try:
+            values = np.asarray(function(grid), dtype=complex)
+            if values.shape != grid.shape:
+                raise TypeError
+        except (TypeError, ValueError):
+            values = np.array([function(float(value)) for value in grid],
+                              dtype=complex)
+        spline = CubicSpline(grid, values, extrapolate=False)
+        self._correlation_splines[key] = (max_tau, spline)
+        return spline
+
     def _upper_triangle(self, tau: float) -> np.ndarray:
         """Return the matrix of upper-triangle integrals at ``tau``."""
         if tau <= 0.0 or np.isclose(tau, 0.0):
@@ -48,13 +111,17 @@ class GeneralizedInfluenceTensor:
                 (len(self._operators), len(self._operators)), dtype=complex)
         key = round(float(tau), 14)
         if key not in self._upper_triangle_cache:
-            self._upper_triangle_cache[key] = np.array([
-                [correlation.correlation_2d_integral(
-                    delta=key, time_1=0.0, time_2=None,
-                    shape="upper-triangle")
-                 for correlation in row]
-                for row in self._bath.correlations_matrix],
-                dtype=complex)
+            values = {}
+            for row in self._bath.correlations_matrix:
+                for correlation in row:
+                    channel = self._channel_key(correlation)
+                    if channel not in values:
+                        values[channel] = correlation.correlation_2d_integral(
+                            delta=key, time_1=0.0, time_2=None,
+                            shape="upper-triangle")
+            self._upper_triangle_cache[key] = np.asarray([
+                [values[self._channel_key(correlation)] for correlation in row]
+                for row in self._bath.correlations_matrix], dtype=complex)
         return self._upper_triangle_cache[key]
 
     def eta_interval(self, t_k0: float, t_k1: float,
@@ -71,30 +138,21 @@ class GeneralizedInfluenceTensor:
                       round(t_k0 - t_m0, 12))
             if widths not in self._interval_eta_cache:
                 values = []
+                a = t_k0 - t_m1
+                d = t_k1 - t_m0
+                b = min(t_k0 - t_m0, t_k1 - t_m1)
+                c = max(t_k0 - t_m0, t_k1 - t_m1)
                 for row in self._bath.correlations_matrix:
                     value_row = []
                     for correlation in row:
-                        function = getattr(correlation, "correlation", None)
+                        function = self._interpolated_correlation(
+                            correlation, d)
                         if not callable(function):
                             value_row = []
                             break
-                        a = t_k0 - t_m1
-                        d = t_k1 - t_m0
-                        b = min(t_k0 - t_m0, t_k1 - t_m1)
-                        c = max(t_k0 - t_m0, t_k1 - t_m1)
-                        points = [point for point in (b, c)
-                                  if a < point < d]
-                        real = quad(
-                            lambda s: np.real(function(s) * (
-                                min(t_k1, t_m1 + s)
-                                - max(t_k0, t_m0 + s))),
-                            a, d, points=points)[0]
-                        imag = quad(
-                            lambda s: np.imag(function(s) * (
-                                min(t_k1, t_m1 + s)
-                                - max(t_k0, t_m0 + s))),
-                            a, d, points=points)[0]
-                        value_row.append(real + 1j * imag)
+                        value_row.append(_integrate_tent_1d(
+                            function, a, b, c, d,
+                            t_k0, t_k1, t_m0, t_m1))
                     if not value_row:
                         values = []
                         break
@@ -165,16 +223,19 @@ class GeneralizedInfluenceTensor:
             shape = "square"
             time_1 = distance * self._parameters.dt
             time_2 = None
-        eta = np.array([
-            [correlation.correlation_2d_integral(
-                delta=self._parameters.dt,
-                time_1=time_1,
-                time_2=time_2,
-                shape=shape)
-             for correlation in row]
-            for row in self._bath.correlations_matrix],
-            dtype=complex,
-        )
+        values = {}
+        for row in self._bath.correlations_matrix:
+            for correlation in row:
+                channel = self._channel_key(correlation)
+                if channel not in values:
+                    values[channel] = correlation.correlation_2d_integral(
+                        delta=self._parameters.dt,
+                        time_1=time_1,
+                        time_2=time_2,
+                        shape=shape)
+        eta = np.asarray([
+            [values[self._channel_key(correlation)] for correlation in row]
+            for row in self._bath.correlations_matrix], dtype=complex)
         self._eta_cache[distance] = eta
         return eta
 
