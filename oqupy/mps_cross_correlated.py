@@ -16,20 +16,53 @@ class CrossCorrelatedMPS:
     """MPS with adjacent-gate SVD compression and exact SWAP routing."""
 
     def __init__(self, physical_dimension: int, epsrel: float,
-                 max_bond_dimension: Optional[int] = None):
-        self.physical_dimension = physical_dimension
+                 max_bond_dimension: Optional[int] = None,
+                 superoperator_mode: bool = False):
+        self.superoperator_mode = bool(superoperator_mode)
+        self.state_dimension = physical_dimension
+        self.physical_dimension = (
+            physical_dimension**2 if self.superoperator_mode
+            else physical_dimension)
         self.epsrel = epsrel
         self.max_bond_dimension = max_bond_dimension
         self.tensors = []
 
+    def set_initial_state(self, state_vector: np.ndarray) -> None:
+        """Set the first MPS site from a vectorized system state."""
+        state = np.asarray(state_vector, dtype=complex)
+        if not self.superoperator_mode:
+            self.tensors = [state.reshape(1, self.state_dimension, 1)]
+            return
+        tensor = np.zeros(
+            (1, self.state_dimension, self.state_dimension, 1),
+            dtype=complex)
+        tensor[0, 0, :, 0] = state
+        self.tensors = [tensor.reshape(1, self.physical_dimension, 1)]
+
     def append_propagated_site(self, propagator):
         """Append a site correlated with the current site's physical index."""
-        dimension = self.physical_dimension
+        dimension = self.state_dimension
         if not self.tensors:
             raise ValueError("Cannot append to an empty MPS.")
         last = self.tensors[-1]
         if last.shape[2] != 1:
             raise ValueError("The MPS must have an open right boundary.")
+        if self.superoperator_mode:
+            last_vec = last.reshape(
+                last.shape[0], dimension, dimension)[:, 0, :]
+            left_tensor = np.zeros(
+                (last.shape[0], dimension, dimension, dimension),
+                dtype=complex)
+            for bond in range(dimension):
+                left_tensor[:, bond, :, bond] = last_vec
+            new_tensor = np.zeros(
+                (dimension, dimension, dimension, 1), dtype=complex)
+            new_tensor[:, 0, :, 0] = np.asarray(propagator).T
+            self.tensors[-1] = left_tensor.reshape(
+                last.shape[0], self.physical_dimension, dimension)
+            self.tensors.append(new_tensor.reshape(
+                dimension, self.physical_dimension, 1))
+            return
         left_tensor = np.zeros((last.shape[0], dimension, dimension),
                                dtype=complex)
         for physical in range(dimension):
@@ -42,6 +75,16 @@ class CrossCorrelatedMPS:
     def apply_one_site(self, site: int, operator):
         op_mat = np.asarray(operator)
         tensor = self.tensors[site]
+        if self.superoperator_mode and op_mat.shape == (
+                self.state_dimension, self.state_dimension):
+            left_dim, _, right_dim = tensor.shape
+            reshaped = tensor.reshape(
+                left_dim, self.state_dimension, self.state_dimension,
+                right_dim)
+            result = np.einsum("pq,lsqr->lspr", op_mat, reshaped)
+            self.tensors[site] = result.reshape(
+                left_dim, self.physical_dimension, right_dim)
+            return
         res = np.tensordot(op_mat, tensor, axes=([1], [1]))
         self.tensors[site] = res.transpose(1, 0, 2)
 
@@ -52,6 +95,15 @@ class CrossCorrelatedMPS:
 
         left = self.tensors[site]
         right = self.tensors[site + 1]
+        gate = np.asarray(gate)
+        if self.superoperator_mode and gate.shape == (
+                self.state_dimension, self.state_dimension,
+                self.state_dimension, self.state_dimension):
+            eye = np.eye(self.state_dimension, dtype=complex)
+            gate = np.einsum(
+                "ab,cd,prqs->apcrbqds", eye, eye, gate).reshape(
+                    self.physical_dimension, self.physical_dimension,
+                    self.physical_dimension, self.physical_dimension)
         left_dimension, physical = left.shape[0], left.shape[1]
         right_physical, right_dimension = right.shape[1], right.shape[2]
 
@@ -59,8 +111,8 @@ class CrossCorrelatedMPS:
         joint_mat = joint.transpose(1, 2, 0, 3).reshape(
             physical * right_physical, left_dimension * right_dimension)
 
-        gate_mat = np.asarray(gate).reshape(physical * right_physical,
-                                            physical * right_physical)
+        gate_mat = gate.reshape(physical * right_physical,
+                               physical * right_physical)
         joint_gated = np.dot(gate_mat, joint_mat)
         joint_gated = joint_gated.reshape(physical, right_physical,
                                           left_dimension, right_dimension)
@@ -123,15 +175,37 @@ class CrossCorrelatedMPS:
     def state_at_last_site(self, trace_vector=None):
         """Sum all historical path indices and return the latest state."""
         del trace_vector
-        sum_vector = np.ones(self.physical_dimension, dtype=complex)
+        if self.superoperator_mode:
+            sum_vector = np.eye(
+                self.state_dimension, dtype=complex).reshape(-1)
+        else:
+            sum_vector = np.ones(self.physical_dimension, dtype=complex)
         if len(self.tensors) == 1:
-            return self.tensors[0][0, :, 0]
+            result = self.tensors[0][0, :, 0]
+            return (result.reshape(self.state_dimension, self.state_dimension)
+                    [0, :] if self.superoperator_mode else result)
         tensor = np.tensordot(self.tensors[0], sum_vector, axes=(1, 0))
         for site in range(1, len(self.tensors) - 1):
             tensor = np.tensordot(tensor, self.tensors[site], axes=(-1, 0))
             tensor = np.tensordot(tensor, sum_vector, axes=(1, 0))
         tensor = np.tensordot(tensor, self.tensors[-1], axes=(-1, 0))
-        return np.asarray(tensor).reshape(-1)
+        result = np.asarray(tensor).reshape(-1)
+        return (result.reshape(self.state_dimension, self.state_dimension)[0, :]
+                if self.superoperator_mode else result)
+
+    def contract_oldest(self) -> None:
+        """Trace out the oldest history site and absorb its boundary."""
+        if len(self.tensors) < 2:
+            raise ValueError("Cannot contract the only MPS site.")
+        if self.superoperator_mode:
+            vector = np.eye(
+                self.state_dimension, dtype=complex).reshape(-1)
+        else:
+            vector = np.ones(self.physical_dimension, dtype=complex)
+        boundary = np.einsum("lpr,p->lr", self.tensors[0], vector)
+        self.tensors[1] = np.einsum(
+            "lr,rps->lps", boundary, self.tensors[1])
+        self.tensors.pop(0)
 
 
 class MPSPtTempo:
@@ -142,8 +216,6 @@ class MPSPtTempo:
                  max_steps: int = 100, memory_cutoff: Optional[int] = None):
         if not isinstance(bath, Bath):
             raise TypeError("bath must be a Bath instance")
-        if bath.commuting_channels:
-            raise ValueError("MPSPtTempo requires noncommuting channels.")
         if parameters.dkmax is None:
             raise ValueError("MPSPtTempo requires an explicit dkmax.")
         self.system = system
@@ -163,8 +235,9 @@ class MPSPtTempo:
         propagators = self.system.get_propagators(
             self.parameters.dt, self.start_time, None, None)
         influence = GeneralizedInfluenceTensor(self.bath, self.parameters)
-        mps = CrossCorrelatedMPS(physical_dimension, self.parameters.epsrel)
-        trace_vector = np.eye(dimension, dtype=complex).reshape(-1)
+        mps = CrossCorrelatedMPS(
+            physical_dimension, self.parameters.epsrel,
+            superoperator_mode=not self.bath.commuting_channels)
         states = [self.initial_state.copy()]
         previous_second_half = None
         progress = get_progress(progress_type)(self.max_steps,
@@ -173,9 +246,8 @@ class MPSPtTempo:
             for step in range(self.max_steps):
                 first_half, second_half = propagators(step)
                 if step == 0:
-                    mps.tensors = [
-                        (first_half @ self.initial_state.reshape(-1))
-                        .reshape(1, physical_dimension, 1)]
+                    mps.set_initial_state(
+                        first_half @ self.initial_state.reshape(-1))
                     mps.apply_one_site(0, influence.gate(0))
                 else:
                     mps.append_propagated_site(
@@ -187,7 +259,7 @@ class MPSPtTempo:
                         mps.apply_nonlocal_gate(
                             older, newest,
                             influence.gate(newest - older))
-                state = second_half @ mps.state_at_last_site(trace_vector)
+                state = second_half @ mps.state_at_last_site()
                 states.append(state.reshape(dimension, dimension))
                 previous_second_half = second_half
                 progress_bar.update(step + 1)

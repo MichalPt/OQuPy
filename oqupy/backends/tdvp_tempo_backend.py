@@ -119,9 +119,11 @@ class TdvpTempoBackend:
             unitary.conjugate().T, unitary.T)
         liouville_inverse = liouville_transform.conjugate().T
         initial_state = liouville_transform @ self.initial_state.reshape(-1)
+        superop_mode = not self.bath.commuting_channels
         mps = CrossCorrelatedMPS(
             physical, self.parameters.epsrel,
-            self.parameters.max_bond_dimension)
+            self.parameters.max_bond_dimension,
+            superoperator_mode=superop_mode)
         states = [self.initial_state.copy()]
         previous_second_half = None
         active_intervals = []
@@ -139,7 +141,7 @@ class TdvpTempoBackend:
                 second_half = liouville_transform @ second_half @ liouville_inverse
                 if step == 0:
                     midpoint = first_half @ initial_state
-                    mps.tensors = [midpoint.reshape(1, physical, 1)]
+                    mps.set_initial_state(midpoint)
                     mps.apply_one_site(
                         0, influence.gate_interval(t_k0, t_k1))
                     active_intervals.append((float(t_k0), float(t_k1)))
@@ -153,14 +155,14 @@ class TdvpTempoBackend:
                     while (self.parameters.dkmax is not None
                            and len(mps.tensors)
                            > self.parameters.dkmax + 1):
-                        self._contract_oldest(mps, physical)
+                        mps.contract_oldest()
                         active_intervals.pop(0)
                     while (self.parameters.tcut is not None
                            and active_intervals
                            and len(mps.tensors) > 1
                            and t_k0 - active_intervals[0][0]
                            > self.parameters.tcut):
-                        self._contract_oldest(mps, physical)
+                        mps.contract_oldest()
                         active_intervals.pop(0)
                     length = len(mps.tensors)
                     _right_canonicalize(
@@ -186,15 +188,6 @@ class TdvpTempoBackend:
                 progress_bar.update(step + 1)
 
         return Dynamics(times=list(time_grid), states=states)
-
-    @staticmethod
-    def _contract_oldest(mps, physical: int) -> None:
-        boundary = np.einsum(
-            "lpr,p->lr", mps.tensors[0],
-            np.ones(physical, dtype=complex))
-        mps.tensors[1] = np.einsum(
-            "lr,rps->lps", boundary, mps.tensors[1])
-        mps.tensors.pop(0)
 
     def _tdvp_sweep(self, mps, mpo, dt: float) -> None:
         """Run one forward/backward two-site TDVP sweep."""
@@ -307,7 +300,8 @@ class TdvpTempoBackend:
                 self.bath, self.parameters)
             self._mps = CrossCorrelatedMPS(
                 physical, self.parameters.epsrel,
-                self.parameters.max_bond_dimension)
+                self.parameters.max_bond_dimension,
+                superoperator_mode=not self.bath.commuting_channels)
             self._previous_second_half = None
             self._mpo_cache = {}
             states = [self.initial_state.copy()]
@@ -326,6 +320,7 @@ class TdvpTempoBackend:
         liouville_inverse = liouville_transform.conjugate().T
         initial_state = liouville_transform @ self.initial_state.reshape(-1)
         mps = self._mps
+        superop_mode = not self.bath.commuting_channels
         previous_second_half = self._previous_second_half
         mpo_cache = self._mpo_cache
         start_step = self._uniform_steps
@@ -343,7 +338,7 @@ class TdvpTempoBackend:
                     liouville_transform @ second_half @ liouville_inverse)
                 if step == 0:
                     first_midpoint = first_half @ initial_state
-                    mps.tensors = [first_midpoint.reshape(1, physical, 1)]
+                    mps.set_initial_state(first_midpoint)
                     mps.apply_one_site(0, influence.gate(0))
                 else:
                     mps.append_propagated_site(
@@ -351,7 +346,7 @@ class TdvpTempoBackend:
                     length = len(mps.tensors)
                     mps.apply_one_site(length - 1, influence.gate(0))
                     while len(mps.tensors) > cutoff + 1:
-                        self._contract_oldest(mps, physical)
+                        mps.contract_oldest()
                     length = len(mps.tensors)
                     _right_canonicalize(
                         mps.tensors,

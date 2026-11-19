@@ -29,6 +29,12 @@ class TdvpEnvironments:
     @staticmethod
     def _left_step(block: np.ndarray, tensor: np.ndarray,
                    operator: np.ndarray) -> np.ndarray:
+        d = operator.shape[2]
+        if tensor.shape[1] == d * d:
+            reshaped = tensor.reshape(tensor.shape[0], d, d, tensor.shape[2])
+            tmp = np.einsum("awb,bfsj->wafsj", block, reshaped)
+            tmp = np.einsum("wafsj,wxts->axftj", tmp, operator)
+            return np.einsum("axftj,afti->ixj", tmp, reshaped.conj())
         tmp = np.einsum("awb,bsj->wasj", block, tensor)
         tmp = np.einsum("wasj,wxts->axtj", tmp, operator)
         return np.einsum("axtj,ati->ixj", tmp, tensor.conj())
@@ -36,6 +42,12 @@ class TdvpEnvironments:
     @staticmethod
     def _right_step(block: np.ndarray, tensor: np.ndarray,
                     operator: np.ndarray) -> np.ndarray:
+        d = operator.shape[2]
+        if tensor.shape[1] == d * d:
+            reshaped = tensor.reshape(tensor.shape[0], d, d, tensor.shape[2])
+            tmp = np.einsum("bfsj,ixj->bfsxi", reshaped, block)
+            tmp = np.einsum("bfsxi,wxts->bwfti", tmp, operator)
+            return np.einsum("bwfti,afti->awb", tmp, reshaped.conj())
         tmp = np.einsum("bsj,ixj->bsxi", tensor, block)
         tmp = np.einsum("bsxi,wxts->bwti", tmp, operator)
         return np.einsum("bwti,ati->awb", tmp, tensor.conj())

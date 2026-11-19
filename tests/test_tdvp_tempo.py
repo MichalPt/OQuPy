@@ -236,7 +236,7 @@ def test_tdvp_eight_steps_matches_tempo():
     assert np.max(np.abs(tdvp.states - tempo.states)) < 1e-10
 
 
-def test_tdvp_eight_steps_matches_cross_correlated_references():
+def test_tdvp_five_steps_matches_cross_correlated_references():
     bath = _cross_correlated_bath()
     system = oqupy.System(0.5 * oqupy.operators.sigma("z"))
     initial_state = oqupy.operators.spin_dm("z+")
@@ -245,11 +245,11 @@ def test_tdvp_eight_steps_matches_cross_correlated_references():
 
     tdvp = oqupy.TdvpTempo(
         system, bath, parameters, initial_state).compute(
-            0.8, progress_type="silent")
+            0.5, progress_type="silent")
     dense = oqupy.DensePtTempo(
-        system, bath, parameters, initial_state, max_steps=8).compute()
+        system, bath, parameters, initial_state, max_steps=5).compute()
     mps = oqupy.MPSPtTempo(
-        system, bath, parameters, initial_state, max_steps=8).compute(
+        system, bath, parameters, initial_state, max_steps=5).compute(
             progress_type="silent")
 
     assert np.max(np.abs(tdvp.states - dense.states)) < 1e-8

@@ -375,6 +375,8 @@ class DensePtTempo:
         history = None
         states = [self._initial_state.copy()]
         previous_second_half = None
+        dimension = self._bath.dimension
+        physical_dimension = dimension**2
 
         for step in range(num_steps):
             first_half, second_half = propagators(step)
@@ -383,10 +385,10 @@ class DensePtTempo:
                 history = self._apply_one_site(
                     history, 0, influence.gate(0))
             else:
+                propagator = first_half @ previous_second_half
                 history = np.einsum(
-                    "...a,ba->...ab",
-                    history, first_half @ previous_second_half)
-                newest = step
+                    "...q,bs->...bqs", history, propagator.T)
+                newest = 2 * step
                 history = self._apply_one_site(
                     history, newest, influence.gate(0))
                 memory = min(step, self._parameters.dkmax)
@@ -394,10 +396,16 @@ class DensePtTempo:
                     history = self._apply_two_site(
                         history,
                         newest,
-                        newest - distance,
+                        2 * (step - distance) + 1,
                         influence.gate(distance))
-            readout = self._apply_one_site(history, step, second_half)
-            state = readout.sum(axis=tuple(range(readout.ndim - 1)))
+            readout = self._apply_one_site(
+                history, 2 * step if step else 0, second_half)
+            if step:
+                for _ in range(step):
+                    readout = np.tensordot(
+                        readout, np.eye(physical_dimension, dtype=complex),
+                        axes=([0, 1], [0, 1]))
+            state = np.asarray(readout).reshape(-1)
             state = state.reshape(self._bath.dimension, self._bath.dimension)
             states.append(state)
             previous_second_half = second_half
