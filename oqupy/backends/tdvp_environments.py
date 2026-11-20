@@ -29,15 +29,24 @@ class TdvpEnvironments:
     @staticmethod
     def _left_step(block: np.ndarray, tensor: np.ndarray,
                    operator: np.ndarray) -> np.ndarray:
+        a, w, b = block.shape
         d = operator.shape[2]
         if tensor.shape[1] == d * d:
-            reshaped = tensor.reshape(tensor.shape[0], d, d, tensor.shape[2])
-            tmp = np.einsum("awb,bfsj->wafsj", block, reshaped)
-            tmp = np.einsum("wafsj,wxts->axftj", tmp, operator)
-            return np.einsum("axftj,afti->ixj", tmp, reshaped.conj())
-        tmp = np.einsum("awb,bsj->wasj", block, tensor)
-        tmp = np.einsum("wasj,wxts->axtj", tmp, operator)
-        return np.einsum("axtj,ati->ixj", tmp, tensor.conj())
+            j = tensor.shape[2]
+            reshaped = tensor.reshape(b, d, d, j)
+            tmp = (block.reshape(a * w, b)
+                   @ reshaped.reshape(b, d * d * j)).reshape(
+                       a, w, d, d, j)
+            tmp = np.tensordot(tmp, operator, axes=([1, 3], [0, 3]))
+            return np.tensordot(
+                reshaped.conj(), tmp,
+                axes=([0, 1, 2], [0, 1, 4])).transpose(0, 2, 1)
+        j = tensor.shape[2]
+        tmp = (block.reshape(a * w, b)
+               @ tensor.reshape(b, d * j)).reshape(a, w, d, j)
+        tmp = np.tensordot(tmp, operator, axes=([1, 2], [0, 3]))
+        return np.tensordot(
+            tensor.conj(), tmp, axes=([0, 1], [0, 3])).transpose(0, 2, 1)
 
     @staticmethod
     def _right_step(block: np.ndarray, tensor: np.ndarray,
@@ -45,12 +54,15 @@ class TdvpEnvironments:
         d = operator.shape[2]
         if tensor.shape[1] == d * d:
             reshaped = tensor.reshape(tensor.shape[0], d, d, tensor.shape[2])
-            tmp = np.einsum("bfsj,ixj->bfsxi", reshaped, block)
-            tmp = np.einsum("bfsxi,wxts->bwfti", tmp, operator)
-            return np.einsum("bwfti,afti->awb", tmp, reshaped.conj())
-        tmp = np.einsum("bsj,ixj->bsxi", tensor, block)
-        tmp = np.einsum("bsxi,wxts->bwti", tmp, operator)
-        return np.einsum("bwti,ati->awb", tmp, tensor.conj())
+            tmp = np.tensordot(reshaped, block, axes=([3], [2]))
+            tmp = np.tensordot(tmp, operator, axes=([2, 4], [3, 1]))
+            return np.tensordot(
+                reshaped.conj(), tmp,
+                axes=([1, 2, 3], [1, 4, 2])).transpose(0, 2, 1)
+        tmp = np.tensordot(tensor, block, axes=([2], [2]))
+        tmp = np.tensordot(tmp, operator, axes=([1, 3], [3, 1]))
+        return np.tensordot(
+            tensor.conj(), tmp, axes=([1, 2], [3, 1])).transpose(0, 2, 1)
 
     def build_right(self) -> None:
         """Build all right environments from right to left."""

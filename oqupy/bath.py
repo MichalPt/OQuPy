@@ -101,9 +101,9 @@ class Bath(BaseAPIClass):
                                         for operator in diagonal_operators]
         else:
             self._coupling_operators = self._original_coupling_operators
-            self._unitary = np.identity(self._dimension)
         self._coupling_operator = self._coupling_operators[0]
-        self._unitary = v
+        self._unitary = v if self._commuting_channels \
+            else np.identity(self._dimension)
 
         # identify degeneracies in eigensystem of coupling operator
         coupling_comm = np.array([

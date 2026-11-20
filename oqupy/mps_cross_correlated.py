@@ -235,6 +235,13 @@ class MPSPtTempo:
         propagators = self.system.get_propagators(
             self.parameters.dt, self.start_time, None, None)
         influence = GeneralizedInfluenceTensor(self.bath, self.parameters)
+        unitary = (self.bath.unitary_transform
+                   if self.bath.commuting_channels
+                   else np.eye(dimension, dtype=complex))
+        liouville_transform = np.kron(
+            unitary.conjugate().T, unitary.T)
+        liouville_inverse = liouville_transform.conjugate().T
+        initial_state = liouville_transform @ self.initial_state.reshape(-1)
         mps = CrossCorrelatedMPS(
             physical_dimension, self.parameters.epsrel,
             superoperator_mode=not self.bath.commuting_channels)
@@ -245,9 +252,13 @@ class MPSPtTempo:
         with progress as progress_bar:
             for step in range(self.max_steps):
                 first_half, second_half = propagators(step)
+                first_half = (
+                    liouville_transform @ first_half @ liouville_inverse)
+                second_half = (
+                    liouville_transform @ second_half @ liouville_inverse)
                 if step == 0:
                     mps.set_initial_state(
-                        first_half @ self.initial_state.reshape(-1))
+                        first_half @ initial_state)
                     mps.apply_one_site(0, influence.gate(0))
                 else:
                     mps.append_propagated_site(
@@ -259,7 +270,10 @@ class MPSPtTempo:
                         mps.apply_nonlocal_gate(
                             older, newest,
                             influence.gate(newest - older))
-                state = second_half @ mps.state_at_last_site()
+                    while len(mps.tensors) > self.memory_cutoff + 1:
+                        mps.contract_oldest()
+                state = liouville_inverse @ (
+                    second_half @ mps.state_at_last_site())
                 states.append(state.reshape(dimension, dimension))
                 previous_second_half = second_half
                 progress_bar.update(step + 1)

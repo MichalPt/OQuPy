@@ -43,10 +43,167 @@ def _right_canonicalize(tensors, epsrel: float = 0.0,
         r_mat, q_mat = scipy.linalg.rq(matrix, mode="economic")
         keep = q_mat.shape[0]
         tensors[index] = q_mat.reshape(keep, physical, right_dimension)
-        tensors[index - 1] = np.einsum(
-            "lpr,rk->lpk",
-            tensors[index - 1],
-            r_mat)
+        prev = tensors[index - 1]
+        tensors[index - 1] = (
+            prev.reshape(prev.shape[0] * prev.shape[1], prev.shape[2])
+            @ r_mat).reshape(prev.shape[0], prev.shape[1], keep)
+
+
+def _left_canonicalize(tensors) -> None:
+    """Losslessly left-canonicalize all sites except the right boundary."""
+    for index in range(len(tensors) - 1):
+        tensor = tensors[index]
+        left_dimension, physical, right_dimension = tensor.shape
+        matrix = tensor.reshape(left_dimension * physical, right_dimension)
+        q_mat, r_mat = scipy.linalg.qr(matrix, mode="economic")
+        keep = q_mat.shape[1]
+        tensors[index] = q_mat.reshape(left_dimension, physical, keep)
+        nxt = tensors[index + 1]
+        tensors[index + 1] = (
+            r_mat @ nxt.reshape(
+                nxt.shape[0], nxt.shape[1] * nxt.shape[2])
+        ).reshape(keep, nxt.shape[1], nxt.shape[2])
+
+
+def _apply_mpo(tensors, mpo):
+    """Apply an MPO to an MPS using the output/input convention of the backend."""
+    sliced = list(mpo)
+    sliced[0] = sliced[0][0:1, :, :, :]
+    sliced[-1] = sliced[-1][:, 1:2, :, :]
+    n_sites = len(sliced)
+    fwd = [np.array([True], dtype=bool)]
+    for operator in sliced:
+        nonzeros = np.any(operator != 0, axis=(2, 3))
+        fwd.append(np.any(nonzeros[fwd[-1]], axis=0))
+    bwd = [None] * (n_sites + 1)
+    bwd[n_sites] = np.array([True], dtype=bool)
+    for index in range(n_sites - 1, -1, -1):
+        nonzeros = np.any(sliced[index] != 0, axis=(2, 3))
+        bwd[index] = np.any(
+            nonzeros[:, bwd[index + 1]], axis=1)
+    active = [forward & backward
+              for forward, backward in zip(fwd, bwd)]
+    if any(not np.any(mask) for mask in active):
+        return [
+            np.zeros((1, tensor.shape[1], 1), dtype=complex)
+            for tensor in tensors
+        ]
+    result = []
+    for index, tensor in enumerate(tensors):
+        operator = sliced[index][active[index]][:, active[index + 1]]
+        left, physical, right = tensor.shape
+        mpo_left, mpo_right, output, input_dimension = operator.shape
+        if physical == input_dimension:
+            contracted = np.tensordot(
+                operator, tensor, axes=([3], [1]))
+            result.append(contracted.transpose(
+                0, 3, 2, 1, 4).reshape(
+                    mpo_left * left, output, mpo_right * right))
+        elif physical == input_dimension * input_dimension:
+            d = input_dimension
+            tensor_4d = tensor.reshape(left, d, d, right)
+            contracted = np.tensordot(
+                operator, tensor_4d, axes=([3], [2]))
+            result.append(contracted.transpose(
+                0, 3, 4, 2, 1, 5).reshape(
+                    mpo_left * left, d * output, mpo_right * right))
+        else:
+            raise ValueError("MPO and MPS physical dimensions do not match")
+    return result
+
+
+def _gse_expand(mps, mpo, epsrel, max_bond_dimension):
+    """Expand a right-canonical MPS with the MPO Krylov direction."""
+    if max_bond_dimension is not None:
+        min_expandable = next(
+            (index for index in range(1, len(mps.tensors))
+             if mps.tensors[index].shape[0] < max_bond_dimension),
+            None)
+        if min_expandable is None:
+            return
+    else:
+        min_expandable = 1
+    phi = _apply_mpo(mps.tensors, mpo)
+    _left_canonicalize(phi)
+    overlap_right = np.eye(1, dtype=complex)
+    for index in range(len(mps.tensors) - 1, min_expandable - 1, -1):
+        current = mps.tensors[index]
+        target = phi[index]
+        if target.shape[2] != overlap_right.shape[1]:
+            raise ValueError(
+                "GSE right-overlap dimension does not match the Krylov "
+                "tensor right bond")
+        left, physical, right = current.shape
+        current_matrix = current.reshape(left, physical * right)
+        can_expand = (
+            max_bond_dimension is None or left < max_bond_dimension)
+        if can_expand:
+            mapped_matrix = (
+                target.reshape(-1, target.shape[2])
+                @ overlap_right.T).reshape(
+                    target.shape[0], physical * right)
+            mapped_norm = float(np.linalg.norm(mapped_matrix))
+            if mapped_norm == 0.0:
+                keep = 0
+            else:
+                projected = mapped_matrix - (
+                    mapped_matrix @ current_matrix.conj().T) @ current_matrix
+                _, singular, vh = scipy.linalg.svd(
+                    projected, full_matrices=False)
+                threshold = max(epsrel, 1.0e-12) * mapped_norm
+                keep = int(np.count_nonzero(singular > threshold))
+                if max_bond_dimension is not None:
+                    keep = min(keep, max_bond_dimension - left)
+                keep = max(0, keep)
+        else:
+            expanded = current_matrix
+            mps.tensors[index] = current
+            keep = 0
+        if keep:
+            extra = vh[:keep]
+            extra = extra - (
+                extra @ current_matrix.conj().T) @ current_matrix
+            _, s_extra, vh_extra = scipy.linalg.svd(
+                extra, full_matrices=False)
+            valid = int(np.count_nonzero(s_extra > 1.0e-10))
+            extra = vh_extra[:valid]
+            expanded = np.vstack((current_matrix, extra))
+            mps.tensors[index] = expanded.reshape(
+                left + valid, physical, right)
+            previous = mps.tensors[index - 1]
+            if valid > 0:
+                mps.tensors[index - 1] = np.pad(
+                    previous, ((0, 0), (0, 0), (0, valid)))
+        else:
+            if can_expand:
+                expanded = current_matrix
+                mps.tensors[index] = current
+
+        if index == min_expandable:
+            break
+
+        u_phi, s_phi, vh_phi = scipy.linalg.svd(
+            target.reshape(target.shape[0], physical * target.shape[2]),
+            full_matrices=False)
+        if s_phi.size == 0 or s_phi[0] == 0.0:
+            break
+        keep_phi = max(1, int(np.count_nonzero(
+            s_phi > max(epsrel, 1.0e-12) * s_phi[0])))
+        if max_bond_dimension is not None:
+            keep_phi = min(keep_phi, max_bond_dimension)
+        phi_right_iso = vh_phi[:keep_phi].reshape(
+            keep_phi, physical, target.shape[2])
+        phi[index] = phi_right_iso
+        us = u_phi[:, :keep_phi] * s_phi[:keep_phi]
+        prev_phi = phi[index - 1]
+        phi[index - 1] = (
+                prev_phi.reshape(-1, prev_phi.shape[2]) @ us
+        ).reshape(prev_phi.shape[0], prev_phi.shape[1], keep_phi)
+        mapped_iso = (
+                phi_right_iso.reshape(-1, target.shape[2])
+                @ overlap_right.T
+        ).reshape(keep_phi, physical * right)
+        overlap_right = expanded.conj() @ mapped_iso.T
 
 
 class TdvpTempoBackend:
@@ -60,6 +217,16 @@ class TdvpTempoBackend:
         self.initial_state = np.asarray(initial_state, dtype=complex)
         self.start_time = float(start_time)
         self._dynamics: Optional[Dynamics] = None
+        self._mps = None
+        self._previous_second_half = None
+        self._mpo_cache = {}
+        self._influence = None
+        self._propagators = None
+        self._uniform_steps = 0
+        self._uniform_dynamics: Optional[Dynamics] = None
+
+    def _reset_uniform_cache(self) -> None:
+        self._uniform_dynamics = None
         self._mps = None
         self._previous_second_half = None
         self._mpo_cache = {}
@@ -84,6 +251,7 @@ class TdvpTempoBackend:
                 self._dynamics = self._compute(
                     grid.size - 1, progress_type=progress_type)
                 return self._dynamics
+            self._reset_uniform_cache()
             self._dynamics = self._compute_time_grid(
                 grid, progress_type=progress_type)
             return self._dynamics
@@ -96,12 +264,12 @@ class TdvpTempoBackend:
         if not np.isclose(
                 self.start_time + steps * self.parameters.dt, end_time):
             raise ValueError("end_time must lie on the TDVP time grid")
-        if self._dynamics is None or len(self._dynamics) - 1 < steps:
-            self._dynamics = self._compute(
+        if self._uniform_dynamics is None or self._uniform_steps < steps:
+            self._compute(
                 steps, progress_type=progress_type)
         return Dynamics(
-            times=list(self._dynamics.times[:steps + 1]),
-            states=list(self._dynamics.states[:steps + 1]))
+            times=list(self._uniform_dynamics.times[:steps + 1]),
+            states=list(self._uniform_dynamics.states[:steps + 1]))
 
     def _compute_time_grid(
             self, time_grid: np.ndarray,
@@ -127,6 +295,22 @@ class TdvpTempoBackend:
         states = [self.initial_state.copy()]
         previous_second_half = None
         active_intervals = []
+        intervals = list(zip(time_grid[:-1], time_grid[1:]))
+        active_preview = []
+        max_lag = 0.0
+        for t_k0, t_k1 in intervals:
+            active_preview.append((float(t_k0), float(t_k1)))
+            while (self.parameters.dkmax is not None
+                   and len(active_preview) > self.parameters.dkmax + 1):
+                active_preview.pop(0)
+            while (self.parameters.tcut is not None
+                   and len(active_preview) > 1
+                   and t_k0 - active_preview[0][1] > self.parameters.tcut):
+                active_preview.pop(0)
+            if active_preview:
+                max_lag = max(
+                    max_lag, float(t_k1) - active_preview[0][0])
+        influence.prepare_splines(max_lag)
 
         with get_progress(progress_type)(
                 time_grid.size - 1,
@@ -160,7 +344,7 @@ class TdvpTempoBackend:
                     while (self.parameters.tcut is not None
                            and active_intervals
                            and len(mps.tensors) > 1
-                           and t_k0 - active_intervals[0][0]
+                           and t_k0 - active_intervals[0][1]
                            > self.parameters.tcut):
                         mps.contract_oldest()
                         active_intervals.pop(0)
@@ -191,6 +375,10 @@ class TdvpTempoBackend:
 
     def _tdvp_sweep(self, mps, mpo, dt: float) -> None:
         """Run one forward/backward two-site TDVP sweep."""
+        if mps.superoperator_mode:
+            _gse_expand(
+                mps, mpo, self.parameters.epsrel,
+                self.parameters.max_bond_dimension)
         if self.parameters.tdvp_method == "1-site":
             self._tdvp_sweep_one_site(mps, mpo, dt)
             return
@@ -207,8 +395,8 @@ class TdvpTempoBackend:
                 theta, self.parameters.epsrel,
                 self.parameters.max_bond_dimension)
             mps.tensors[index] = left
-            mps.tensors[index + 1] = np.einsum(
-                "ab,bpr->apr", center, right)
+            mps.tensors[index + 1] = (
+                center.diagonal()[:, None, None] * right)
             environments.update_left(index)
             if index < length - 2:
                 mps.tensors[index + 1] = evolve_one_site(
@@ -225,8 +413,8 @@ class TdvpTempoBackend:
                 theta, self.parameters.epsrel,
                 self.parameters.max_bond_dimension)
             mps.tensors[index + 1] = right
-            mps.tensors[index] = np.einsum(
-                "apr,rb->apb", left, center)
+            mps.tensors[index] = (
+                left * center.diagonal()[None, None, :])
             environments.update_right(index + 1)
             if index > 0:
                 mps.tensors[index] = evolve_one_site(
@@ -254,14 +442,16 @@ class TdvpTempoBackend:
                                or len(singular))
                     u, singular, vh = u[:, :keep], singular[:keep], vh[:keep]
                     mps.tensors[index] = u.reshape(left_dim, physical, keep)
-                    center = np.diag(singular) @ vh
+                    center = singular[:, None] * vh
                     environments.update_left(index)
                     center = evolve_zero_site(
                         center, -dt / 2, environments.left[index + 1],
                         environments.right[index + 1],
                         np.eye(mpo[index].shape[1], dtype=complex))
-                    mps.tensors[index + 1] = np.einsum(
-                        "ab,bps->aps", center, mps.tensors[index + 1])
+                    nxt = mps.tensors[index + 1]
+                    mps.tensors[index + 1] = (
+                        center @ nxt.reshape(center.shape[1], -1)
+                    ).reshape(center.shape[0], nxt.shape[1], nxt.shape[2])
         for index in range(length - 1, -1, -1):
             mps.tensors[index] = evolve_one_site(
                     mps.tensors[index], dt / 2,
@@ -276,7 +466,7 @@ class TdvpTempoBackend:
                     keep = min(len(singular), self.parameters.max_bond_dimension
                                or len(singular))
                     u, singular, vh = u[:, :keep], singular[:keep], vh[:keep]
-                    center = u @ np.diag(singular)
+                    center = u * singular[None, :]
                     mps.tensors[index] = vh.reshape(
                         keep, physical, right_dim)
                     environments.update_right(index)
@@ -284,8 +474,11 @@ class TdvpTempoBackend:
                         center, -dt / 2, environments.left[index],
                         environments.right[index],
                         np.eye(mpo[index - 1].shape[1], dtype=complex))
-                    mps.tensors[index - 1] = np.einsum(
-                        "lpa,ab->lpb", mps.tensors[index - 1], center)
+                    prev = mps.tensors[index - 1]
+                    mps.tensors[index - 1] = (
+                        prev.reshape(-1, prev.shape[2]) @ center
+                    ).reshape(
+                        prev.shape[0], prev.shape[1], center.shape[1])
 
     def _compute(self, steps: int,
                  progress_type: Optional[str] = None) -> Dynamics:
@@ -293,7 +486,7 @@ class TdvpTempoBackend:
             raise NotImplementedError("Unsupported TDVP method.")
         dimension = self.bath.dimension
         physical = dimension**2
-        if self._dynamics is None:
+        if self._mps is None or self._uniform_dynamics is None:
             self._propagators = self.system.get_propagators(
                 self.parameters.dt, self.start_time, None, None)
             self._influence = ContinuousInfluenceTensor(
@@ -306,10 +499,11 @@ class TdvpTempoBackend:
             self._mpo_cache = {}
             states = [self.initial_state.copy()]
             self._uniform_steps = 0
+            self._uniform_dynamics = None
         else:
-            states = list(self._dynamics.states)
+            states = list(self._uniform_dynamics.states)
             if steps <= self._uniform_steps:
-                return self._dynamics
+                return self._uniform_dynamics
         propagators = self._propagators
         influence = self._influence
         unitary = (self.bath.unitary_transform
@@ -327,6 +521,10 @@ class TdvpTempoBackend:
         cutoff = (self.parameters.dkmax if self.parameters.dkmax is not None
                   else int(np.ceil(
                       self.parameters.tcut / self.parameters.dt)))
+        if steps > start_step:
+            max_distance = min(max(steps - 1, 0), cutoff)
+            influence.prepare_splines(
+                (max_distance + 1) * self.parameters.dt)
 
         with get_progress(progress_type)(
                 steps, "TDVP TEMPO propagation:") as progress_bar:
@@ -374,11 +572,12 @@ class TdvpTempoBackend:
 
         self._uniform_steps = steps
         self._previous_second_half = previous_second_half
-        self._dynamics = Dynamics(
+        self._uniform_dynamics = Dynamics(
             times=list(self.start_time
                       + np.arange(len(states)) * self.parameters.dt),
             states=states)
-        return self._dynamics
+        self._dynamics = self._uniform_dynamics
+        return self._uniform_dynamics
 
     def initialize(self) -> Tuple[int, np.ndarray]:
         """Return the initial step and state."""
@@ -386,7 +585,7 @@ class TdvpTempoBackend:
 
     def compute_step(self) -> Tuple[int, np.ndarray]:
         """Compute and return one additional time step."""
-        current = 0 if self._dynamics is None else len(self._dynamics) - 1
+        current = self._uniform_steps
         dynamics = self.compute(
             self.start_time + (current + 1) * self.parameters.dt)
         return current + 1, dynamics.states[-1]

@@ -5,11 +5,13 @@ from typing import Optional, Tuple
 import numpy as np
 import scipy.linalg
 from scipy.sparse.linalg import LinearOperator
+import warnings
 
 
 def _arnoldi_expm(matvec_fn, vector: np.ndarray, time: float,
                   tol: float = 1.0e-9,
-                  max_krylov: int = 10) -> np.ndarray:
+                  max_krylov: int = 32, _depth: int = 0,
+                  max_depth: int = 8) -> np.ndarray:
     """Apply a matrix exponential using a short Arnoldi Krylov space."""
     norm = float(np.linalg.norm(vector))
     if norm == 0.0 or time == 0.0:
@@ -43,6 +45,24 @@ def _arnoldi_expm(matvec_fn, vector: np.ndarray, time: float,
 
     coefficients = scipy.linalg.expm(
         time * hessenberg[:krylov_dim, :krylov_dim])[:, 0]
+    residual = abs(time * hessenberg[krylov_dim, krylov_dim - 1]
+                   * coefficients[-1])
+    if (residual > tol and max_krylov < vector.size
+            and _depth < max_depth):
+        return _arnoldi_expm(
+            matvec_fn, _arnoldi_expm(
+                matvec_fn, vector, time / 2.0, tol, max_krylov,
+                _depth + 1, max_depth),
+            time / 2.0, tol, max_krylov, _depth + 1, max_depth)
+    if residual > tol:
+        message = "Arnoldi Krylov exponential did not reach the requested "
+        if _depth >= max_depth:
+            message += "residual tolerance before reaching max_depth "
+        else:
+            message += "residual tolerance "
+        warnings.warn(
+            message + f"({residual:.3e} > {tol:.3e}).",
+            RuntimeWarning, stacklevel=2)
     return norm * (coefficients @ basis[:krylov_dim])
 
 
@@ -118,26 +138,33 @@ def evolve_two_site(theta: np.ndarray, time: float, left: np.ndarray,
         def matvec(vector: np.ndarray) -> np.ndarray:
             tmp = (left_mat @ vector.reshape(a_dim, -1)).reshape(
                 a_dim, w_l, d, d, d, d, b_dim)
-            tmp = np.einsum("wxis,awfsgtd->axfigtd", first, tmp)
-            tmp = np.einsum("xyjt,axfigtd->afijgyd", second, tmp)
-            tmp = tmp.transpose(0, 1, 2, 4, 3, 5, 6)
+            tmp = np.tensordot(tmp, first, axes=([1, 3], [0, 3]))
+            tmp = np.tensordot(tmp, second, axes=([5, 3], [0, 3]))
+            tmp = tmp.transpose(0, 1, 4, 2, 6, 5, 3)
             return (tmp.reshape(-1, w_r * b_dim) @ right_mat).reshape(-1)
 
         return _arnoldi_expm(
             matvec, theta.reshape(-1), time,
-            tol=1.0e-12, max_krylov=16).reshape(theta.shape)
+            tol=1.0e-12, max_krylov=32).reshape(theta.shape)
 
-    mpo_pair = np.einsum("wxis,xyjt->wyijst", first, second)
+    a_dim, _, _, b_dim = shape
+    w_l = first.shape[0]
+    w_r = second.shape[1]
+    left_mat = left.reshape(a_dim * w_l, a_dim)
+    right_mat = right.transpose(1, 2, 0).reshape(
+        w_r * b_dim, b_dim)
 
     def matvec(vector: np.ndarray) -> np.ndarray:
-        tensor = vector.reshape(shape)
-        tmp = np.einsum("awc,cstd->awstd", left, tensor)
-        tmp = np.einsum("wyijst,awstd->ayijd", mpo_pair, tmp)
-        return np.einsum("byd,ayijd->aijb", right, tmp).reshape(-1)
+        tmp = (left_mat @ vector.reshape(a_dim, -1)).reshape(
+            a_dim, w_l, d, d, b_dim)
+        tmp = np.tensordot(tmp, first, axes=([1, 2], [0, 3]))
+        tmp = np.tensordot(tmp, second, axes=([3, 1], [0, 3]))
+        tmp = tmp.transpose(0, 2, 4, 3, 1)
+        return (tmp.reshape(-1, w_r * b_dim) @ right_mat).reshape(-1)
 
     return _arnoldi_expm(
         matvec, theta.reshape(-1), time,
-        tol=1.0e-12, max_krylov=16).reshape(theta.shape)
+        tol=1.0e-12, max_krylov=32).reshape(theta.shape)
 
 
 def zero_site_operator(shape: Tuple[int, int], left: np.ndarray,
@@ -170,7 +197,7 @@ def evolve_zero_site(matrix: np.ndarray, time: float, left: np.ndarray,
     operator = zero_site_operator(matrix.shape, left, right, mpo_bond)
     return _arnoldi_expm(
         operator.matvec, matrix.reshape(-1), time,
-        tol=1.0e-12, max_krylov=16).reshape(matrix.shape)
+        tol=1.0e-12, max_krylov=32).reshape(matrix.shape)
 
 
 def one_site_operator(shape: Tuple[int, int, int],
@@ -178,27 +205,28 @@ def one_site_operator(shape: Tuple[int, int, int],
                       mpo_tensor: np.ndarray) -> LinearOperator:
     """Create the effective one-site MPO LinearOperator."""
     size = int(np.prod(shape))
+    d = mpo_tensor.shape[2]
+    a_dim, _, b_dim = shape
+    w_l = mpo_tensor.shape[0]
+    w_r = mpo_tensor.shape[1]
+    left_mat = left.reshape(a_dim * w_l, a_dim)
+    right_mat = right.transpose(1, 2, 0).reshape(
+        w_r * b_dim, b_dim)
 
     def matvec(vector: np.ndarray) -> np.ndarray:
         tensor = vector.reshape(shape)
-        d = mpo_tensor.shape[2]
         if shape[1] == d * d:
-            a_dim, _, b_dim = shape
-            w_l = mpo_tensor.shape[0]
-            w_r = mpo_tensor.shape[1]
-            left_mat = left.reshape(a_dim * w_l, a_dim)
-            right_mat = right.transpose(1, 2, 0).reshape(
-                w_r * b_dim, b_dim)
             tmp = (left_mat @ tensor.reshape(a_dim, d, d, b_dim)
                    .reshape(a_dim, -1)).reshape(
                        a_dim, w_l, d, d, b_dim)
-            tmp = np.einsum("wxis,awfsd->axfid", mpo_tensor, tmp)
-            tmp = tmp.transpose(0, 2, 3, 1, 4)
+            tmp = np.tensordot(tmp, mpo_tensor, axes=([1, 3], [0, 3]))
+            tmp = tmp.transpose(0, 1, 4, 3, 2)
             return (tmp.reshape(-1, w_r * b_dim) @ right_mat).reshape(-1)
-        tmp = np.einsum("awc,csd->awsd", left, tensor)
-        tmp = np.einsum("wxis,awsd->axid", mpo_tensor, tmp)
-        result = np.einsum("bxd,axid->aib", right, tmp)
-        return result.reshape(-1)
+        tmp = (left_mat @ tensor.reshape(a_dim, -1)).reshape(
+            a_dim, w_l, d, b_dim)
+        tmp = np.tensordot(tmp, mpo_tensor, axes=([1, 2], [0, 3]))
+        tmp = tmp.transpose(0, 3, 2, 1)
+        return (tmp.reshape(-1, w_r * b_dim) @ right_mat).reshape(-1)
 
     def rmatvec(vector: np.ndarray) -> np.ndarray:
         tensor = vector.reshape(shape)
@@ -226,4 +254,4 @@ def evolve_one_site(tensor: np.ndarray, time: float,
     operator = one_site_operator(tensor.shape, left, right, mpo_tensor)
     return _arnoldi_expm(
         operator.matvec, tensor.reshape(-1), time,
-        tol=1.0e-12, max_krylov=16).reshape(tensor.shape)
+        tol=1.0e-12, max_krylov=32).reshape(tensor.shape)

@@ -17,6 +17,7 @@ from oqupy.tempo import TempoParameters
 
 _GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(16)
 _SD_GL_NODES, _SD_GL_WEIGHTS = np.polynomial.legendre.leggauss(512)
+_SD_GL_CACHE = {512: (_SD_GL_NODES, _SD_GL_WEIGHTS)}
 
 
 def _integrate_tent_1d(func, a, b, c, d, t_k0, t_k1, t_m0, t_m1):
@@ -49,6 +50,14 @@ class GeneralizedInfluenceTensor:
         self._dimension = bath.dimension
         self._physical_dimension = self._dimension**2
         self._operators = bath.coupling_operators
+        self._correlations_matrix = bath.correlations_matrix
+        self._channel_keys = [
+            [self._channel_key(correlation) for correlation in row]
+            for row in self._correlations_matrix]
+        self._has_callable = all(
+            callable(getattr(correlation, "correlation", None))
+            for row in self._correlations_matrix
+            for correlation in row)
         self._eta_cache = {}
         self._generator_cache = {}
         self._gate_cache = {}
@@ -69,23 +78,53 @@ class GeneralizedInfluenceTensor:
     @staticmethod
     def _channel_key(correlation):
         """Return a stable key for equivalent correlation channels."""
+        def fingerprint(value):
+            if isinstance(value, np.ndarray):
+                return ("ndarray", value.shape, str(value.dtype),
+                        value.tobytes())
+            if isinstance(value, (str, int, float, bool, type(None))):
+                return (type(value).__name__, repr(value))
+            if isinstance(value, (list, tuple)):
+                return (type(value).__name__,
+                        tuple(fingerprint(item) for item in value))
+            if isinstance(value, dict):
+                return ("dict", tuple(sorted(
+                    (repr(key), fingerprint(item))
+                    for key, item in value.items())))
+            try:
+                hash(value)
+            except TypeError:
+                return ("id", id(value))
+            return (type(value).__name__, repr(value))
+
+        state = tuple(sorted(
+            (attribute, fingerprint(value))
+            for attribute, value in vars(correlation).items()
+            if not callable(value)))
+        parameters = tuple(
+            (attribute, repr(getattr(correlation, attribute, None)))
+            for attribute in ("cutoff", "cutoff_type", "temperature",
+                              "alpha", "zeta", "epsrel", "subdiv_limit"))
+        parameters += (("state", state),)
         for attribute in ("correlation_function", "j_function"):
             function = getattr(correlation, attribute, None)
             if function is not None:
                 function = getattr(function, "pyfunc", function)
-                return (attribute, id(function))
+                return (attribute, id(function), parameters)
         function = getattr(correlation, "correlation", None)
         owner = getattr(function, "__self__", None)
         if owner is not None:
-            return ("correlation", id(owner))
+            return ("correlation", type(owner), parameters)
         j_function = getattr(correlation, "j_function", None)
         if j_function is not None:
-            return ("j_function", id(j_function))
-        return ("correlation", id(function), id(correlation))
+            return ("j_function", id(j_function), parameters)
+        return ("correlation", id(function), parameters)
 
-    def _interpolated_correlation(self, correlation, max_tau: float):
+    def _interpolated_correlation(self, correlation, max_tau: float,
+                                  key=None):
         """Return a cached vectorized spline for a scalar correlation."""
-        key = self._channel_key(correlation)
+        if key is None:
+            key = self._channel_key(correlation)
         cached = self._correlation_splines.get(key)
         if cached is not None and max_tau <= cached[0]:
             return cached[1]
@@ -93,15 +132,31 @@ class GeneralizedInfluenceTensor:
         if not callable(function):
             return None
         max_tau = max(float(max_tau), np.finfo(float).eps)
-        grid = np.linspace(0.0, max_tau, 513)
-        j_function = getattr(correlation, "j_function", None)
+        cutoff_type = getattr(correlation, "cutoff_type", None)
         cutoff = getattr(correlation, "cutoff", None)
+        scale = max(float(cutoff), 1.0) if cutoff is not None else 1.0
+        n_grid = max(513, int(np.ceil(8.0 * max_tau * scale / np.pi)) + 1)
+        if n_grid % 2 == 0:
+            n_grid += 1
+        grid = np.linspace(0.0, max_tau, n_grid)
+        j_function = getattr(correlation, "j_function", None)
         temperature = getattr(correlation, "temperature", None)
         if callable(j_function) and cutoff is not None \
-                and temperature is not None:
-            nodes = 0.5 * float(cutoff) * (_SD_GL_NODES + 1.0)
-            weights = 0.5 * float(cutoff) * _SD_GL_WEIGHTS
-            j_values = np.asarray(j_function(nodes), dtype=float)
+                and temperature is not None and cutoff_type == "hard":
+            n_sd = max(
+                512, int(np.ceil(8.0 * max_tau * float(cutoff) / np.pi)))
+            if n_sd not in _SD_GL_CACHE:
+                _SD_GL_CACHE[n_sd] = np.polynomial.legendre.leggauss(n_sd)
+            sd_nodes, sd_weights = _SD_GL_CACHE[n_sd]
+            nodes = 0.5 * float(cutoff) * (sd_nodes + 1.0)
+            weights = 0.5 * float(cutoff) * sd_weights
+            try:
+                j_values = np.asarray(j_function(nodes), dtype=float)
+                if j_values.shape != nodes.shape:
+                    raise TypeError
+            except (TypeError, ValueError):
+                j_values = np.array(
+                    [j_function(float(node)) for node in nodes], dtype=float)
             if temperature > 0.0:
                 coth = 1.0 / np.tanh(nodes / (2.0 * temperature))
             else:
@@ -123,27 +178,38 @@ class GeneralizedInfluenceTensor:
         self._correlation_splines[key] = (max_tau, spline)
         return spline
 
+    def prepare_splines(self, max_tau: float) -> None:
+        """Pre-build correlation splines up to ``max_tau`` once."""
+        if max_tau <= 0.0 or not self._has_callable_correlations():
+            return
+        seen = set()
+        for row, key_row in zip(
+                self._correlations_matrix, self._channel_keys):
+            for correlation, key in zip(row, key_row):
+                if key not in seen:
+                    seen.add(key)
+                    self._interpolated_correlation(
+                        correlation, max_tau, key=key)
+
     def _has_callable_correlations(self) -> bool:
-        return all(
-            callable(getattr(correlation, "correlation", None))
-            for row in self._bath.correlations_matrix
-            for correlation in row)
+        return self._has_callable
 
     def _upper_triangle_from_splines(self, tau: float) -> np.ndarray:
         key = round(float(tau), 14)
         samples = 0.5 * tau * (_GL_NODES + 1.0)
         weights = 0.5 * tau * _GL_WEIGHTS
         values = {}
-        for row in self._bath.correlations_matrix:
-            for correlation in row:
-                channel = self._channel_key(correlation)
+        for row, key_row in zip(
+                self._correlations_matrix, self._channel_keys):
+            for correlation, channel in zip(row, key_row):
                 if channel not in values:
-                    spline = self._interpolated_correlation(correlation, tau)
+                    spline = self._interpolated_correlation(
+                        correlation, tau, key=channel)
                     values[channel] = np.dot(
                         weights, (tau - samples) * spline(samples))
         return np.asarray([
-            [values[self._channel_key(correlation)] for correlation in row]
-            for row in self._bath.correlations_matrix], dtype=complex)
+            [values[channel] for channel in key_row]
+            for key_row in self._channel_keys], dtype=complex)
 
     def _upper_triangle(self, tau: float) -> np.ndarray:
         """Return the matrix of upper-triangle integrals at ``tau``."""
@@ -157,18 +223,17 @@ class GeneralizedInfluenceTensor:
                     self._upper_triangle_from_splines(key))
             else:
                 values = {}
-                for row in self._bath.correlations_matrix:
-                    for correlation in row:
-                        channel = self._channel_key(correlation)
+                for row, key_row in zip(
+                        self._correlations_matrix, self._channel_keys):
+                    for correlation, channel in zip(row, key_row):
                         if channel not in values:
                             values[channel] = (
                                 correlation.correlation_2d_integral(
                                     delta=key, time_1=0.0, time_2=None,
                                     shape="upper-triangle"))
                 self._upper_triangle_cache[key] = np.asarray([
-                    [values[self._channel_key(correlation)]
-                     for correlation in row]
-                    for row in self._bath.correlations_matrix], dtype=complex)
+                    [values[channel] for channel in key_row]
+                    for key_row in self._channel_keys], dtype=complex)
         return self._upper_triangle_cache[key]
 
     def eta_interval(self, t_k0: float, t_k1: float,
@@ -189,11 +254,12 @@ class GeneralizedInfluenceTensor:
                 d = t_k1 - t_m0
                 b = min(t_k0 - t_m0, t_k1 - t_m1)
                 c = max(t_k0 - t_m0, t_k1 - t_m1)
-                for row in self._bath.correlations_matrix:
+                for row, key_row in zip(
+                        self._correlations_matrix, self._channel_keys):
                     value_row = []
-                    for correlation in row:
+                    for correlation, channel in zip(row, key_row):
                         function = self._interpolated_correlation(
-                            correlation, d)
+                            correlation, d, key=channel)
                         if not callable(function):
                             value_row = []
                             break
@@ -280,9 +346,9 @@ class GeneralizedInfluenceTensor:
             time_1 = distance * self._parameters.dt
             time_2 = None
         values = {}
-        for row in self._bath.correlations_matrix:
-            for correlation in row:
-                channel = self._channel_key(correlation)
+        for row, key_row in zip(
+                self._correlations_matrix, self._channel_keys):
+            for correlation, channel in zip(row, key_row):
                 if channel not in values:
                     values[channel] = correlation.correlation_2d_integral(
                         delta=self._parameters.dt,
@@ -290,8 +356,8 @@ class GeneralizedInfluenceTensor:
                         time_2=time_2,
                         shape=shape)
         eta = np.asarray([
-            [values[self._channel_key(correlation)] for correlation in row]
-            for row in self._bath.correlations_matrix], dtype=complex)
+            [values[channel] for channel in key_row]
+            for key_row in self._channel_keys], dtype=complex)
         self._eta_cache[distance] = eta
         return eta
 
