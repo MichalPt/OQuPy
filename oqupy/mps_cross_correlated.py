@@ -12,6 +12,47 @@ from oqupy.tempo import TempoParameters
 from oqupy.util import get_progress
 
 
+def _safe_svd(matrix: np.ndarray):
+    """Compute economic SVD with exact power-of-2 scaling and gesvd fallback."""
+    arr = np.asarray(matrix)
+    if arr.ndim != 2:
+        raise ValueError("SVD input must be a 2-D array")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("array must not contain infs or NaNs")
+    if arr.size == 0:
+        rows, cols = arr.shape
+        k = min(rows, cols)
+        return (
+            np.empty((rows, k), dtype=arr.dtype),
+            np.empty((k,), dtype=np.float64),
+            np.empty((k, cols), dtype=arr.dtype),
+        )
+    if np.iscomplexobj(arr):
+        max_abs = float(max(
+            np.max(np.abs(arr.real)), np.max(np.abs(arr.imag))))
+    else:
+        max_abs = float(np.max(np.abs(arr)))
+    if max_abs == 0.0:
+        return scipy.linalg.svd(
+            arr, full_matrices=False, lapack_driver="gesvd",
+            check_finite=False)
+    _, exp = np.frexp(max_abs)
+    exp = max(-1020, min(1020, int(exp)))
+    scale = float(np.ldexp(1.0, exp))
+    scaled = arr if scale == 1.0 else arr / scale
+    try:
+        u, singular, vh = scipy.linalg.svd(
+            scaled, full_matrices=False, lapack_driver="gesdd",
+            check_finite=False)
+    except scipy.linalg.LinAlgError:
+        u, singular, vh = scipy.linalg.svd(
+            scaled, full_matrices=False, lapack_driver="gesvd",
+            check_finite=False)
+    if scale != 1.0:
+        singular = singular * scale
+    return u, singular, vh
+
+
 class CrossCorrelatedMPS:
     """MPS with adjacent-gate SVD compression and exact SWAP routing."""
 
@@ -119,12 +160,7 @@ class CrossCorrelatedMPS:
         joint_for_svd = joint_gated.transpose(2, 0, 1, 3).reshape(
             left_dimension * physical, right_physical * right_dimension)
 
-        try:
-            u, singular_values, vh = scipy.linalg.svd(
-                joint_for_svd, full_matrices=False, lapack_driver='gesdd')
-        except scipy.linalg.LinAlgError:
-            u, singular_values, vh = scipy.linalg.svd(
-                joint_for_svd, full_matrices=False, lapack_driver='gesvd')
+        u, singular_values, vh = _safe_svd(joint_for_svd)
 
         if self.epsrel > 0.0 and singular_values.size > 0:
             threshold = self.epsrel * singular_values[0]

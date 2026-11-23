@@ -2,10 +2,11 @@
 
 import numpy as np
 import pytest
+import scipy.linalg
 
 import oqupy
 from oqupy.backends.tdvp_tempo_backend import (
-    _apply_mpo, _gse_expand, _right_canonicalize)
+    _apply_mpo, _gse_expand, _right_canonicalize, _safe_svd)
 from oqupy.backends.tdvp_environments import TdvpEnvironments
 from oqupy.backends.tdvp_krylov import _arnoldi_expm
 from oqupy.bath_correlations import BaseCorrelations
@@ -344,3 +345,108 @@ def test_environment_blas_contractions_are_exact(superoperator_mode):
     assert np.max(np.abs(
         TdvpEnvironments._right_step(
             right_block, tensor, operator) - right_reference)) < 1e-13
+
+
+def test_safe_svd_fallback_reconstructs_and_is_unitary(monkeypatch):
+    rng = np.random.default_rng(20261121)
+    matrix = rng.normal(size=(7, 5)) + 1j * rng.normal(size=(7, 5))
+    real_svd = scipy.linalg.svd
+
+    def failing_svd(arr, *args, **kwargs):
+        if kwargs.get("lapack_driver") == "gesdd":
+            raise scipy.linalg.LinAlgError("SVD did not converge")
+        return real_svd(arr, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "svd", failing_svd)
+    u, singular, vh = _safe_svd(matrix)
+    reconstructed = u @ np.diag(singular) @ vh
+    assert np.max(np.abs(reconstructed - matrix)) < 1e-13
+    assert np.linalg.norm(u.conj().T @ u - np.eye(5)) < 1e-13
+    assert np.linalg.norm(vh @ vh.conj().T - np.eye(5)) < 1e-13
+
+
+@pytest.mark.parametrize("method", ["2-site", "1-site"])
+def test_tdvp_svd_fallback_matches_unmocked(method, monkeypatch):
+    bath, system, parameters, initial_state = _noncommuting_problem(method)
+    parameters = oqupy.TdvpTempoParameters(
+        dt=0.1, epsrel=1e-12, dkmax=5, max_bond_dimension=64,
+        tdvp_method=method)
+    unmocked = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(
+            0.4, progress_type="silent")
+
+    real_svd = scipy.linalg.svd
+
+    def failing_svd(arr, *args, **kwargs):
+        if kwargs.get("lapack_driver") == "gesdd":
+            raise scipy.linalg.LinAlgError("SVD did not converge")
+        return real_svd(arr, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "svd", failing_svd)
+    fallback = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(
+            0.4, progress_type="silent")
+    assert np.max(np.abs(fallback.states - unmocked.states)) < 1e-12
+
+
+def test_tdvp_variable_grid_svd_fallback_matches(monkeypatch):
+    bath, system, parameters, initial_state = _noncommuting_problem("2-site")
+    grid = np.array([0.0, 0.07, 0.13, 0.21, 0.4])
+    unmocked = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(
+            time_grid=grid, progress_type="silent")
+
+    real_svd = scipy.linalg.svd
+
+    def failing_svd(arr, *args, **kwargs):
+        if kwargs.get("lapack_driver") == "gesdd":
+            raise scipy.linalg.LinAlgError("SVD did not converge")
+        return real_svd(arr, *args, **kwargs)
+
+    monkeypatch.setattr(scipy.linalg, "svd", failing_svd)
+    fallback = oqupy.TdvpTempo(
+        system, bath, parameters, initial_state).compute(
+            time_grid=grid, progress_type="silent")
+    assert np.max(np.abs(fallback.states - unmocked.states)) < 1e-12
+
+
+@pytest.mark.parametrize("scale", [1e-100, 1e100])
+def test_safe_svd_extreme_scale(scale):
+    rng = np.random.default_rng(100)
+    matrix = (rng.normal(size=(6, 4)) + 1j * rng.normal(size=(6, 4))) * scale
+    u, singular, vh = _safe_svd(matrix)
+    reconstructed = u @ np.diag(singular) @ vh
+    reference_scale = max(
+        np.max(np.abs(matrix.real)), np.max(np.abs(matrix.imag)))
+    assert np.max(np.abs(reconstructed - matrix)) / reference_scale < 1e-13
+    assert np.linalg.norm(u.conj().T @ u - np.eye(4)) < 1e-13
+    assert np.linalg.norm(vh @ vh.conj().T - np.eye(4)) < 1e-13
+
+
+def test_safe_svd_zero_matrix():
+    u, singular, vh = _safe_svd(
+        np.zeros((4, 6), dtype=complex))
+    assert u.shape == (4, 4)
+    assert singular.shape == (4,)
+    assert vh.shape == (4, 6)
+    assert u.dtype == np.dtype(complex)
+    assert vh.dtype == np.dtype(complex)
+    assert np.all(singular == 0.0)
+
+
+def test_safe_svd_empty_matrix():
+    u, singular, vh = _safe_svd(
+        np.zeros((0, 4), dtype=complex))
+    assert u.shape == (0, 0)
+    assert singular.shape == (0,)
+    assert vh.shape == (0, 4)
+    assert u.dtype == np.dtype(complex)
+    assert vh.dtype == np.dtype(complex)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_safe_svd_rejects_nonfinite(bad):
+    matrix = np.ones((3, 3), dtype=complex)
+    matrix[1, 1] = bad
+    with pytest.raises(ValueError):
+        _safe_svd(matrix)

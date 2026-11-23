@@ -15,12 +15,53 @@ from oqupy.mps_cross_correlated import CrossCorrelatedMPS
 from oqupy.util import get_progress
 
 
+def _safe_svd(matrix: np.ndarray):
+    """Compute economic SVD with exact power-of-2 scaling and gesvd fallback."""
+    arr = np.asarray(matrix)
+    if arr.ndim != 2:
+        raise ValueError("SVD input must be a 2-D array")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("array must not contain infs or NaNs")
+    if arr.size == 0:
+        rows, cols = arr.shape
+        k = min(rows, cols)
+        return (
+            np.empty((rows, k), dtype=arr.dtype),
+            np.empty((k,), dtype=np.float64),
+            np.empty((k, cols), dtype=arr.dtype),
+        )
+    if np.iscomplexobj(arr):
+        max_abs = float(max(
+            np.max(np.abs(arr.real)), np.max(np.abs(arr.imag))))
+    else:
+        max_abs = float(np.max(np.abs(arr)))
+    if max_abs == 0.0:
+        return scipy.linalg.svd(
+            arr, full_matrices=False, lapack_driver="gesvd",
+            check_finite=False)
+    _, exp = np.frexp(max_abs)
+    exp = max(-1020, min(1020, int(exp)))
+    scale = float(np.ldexp(1.0, exp))
+    scaled = arr if scale == 1.0 else arr / scale
+    try:
+        u, singular, vh = scipy.linalg.svd(
+            scaled, full_matrices=False, lapack_driver="gesdd",
+            check_finite=False)
+    except scipy.linalg.LinAlgError:
+        u, singular, vh = scipy.linalg.svd(
+            scaled, full_matrices=False, lapack_driver="gesvd",
+            check_finite=False)
+    if scale != 1.0:
+        singular = singular * scale
+    return u, singular, vh
+
+
 def _split(theta: np.ndarray, epsrel: float,
            max_bond_dimension: Optional[int]):
     dl, physical, _, dr = theta.shape
     matrix = theta.transpose(0, 1, 2, 3).reshape(
         dl * physical, physical * dr)
-    u, singular, vh = scipy.linalg.svd(matrix, full_matrices=False)
+    u, singular, vh = _safe_svd(matrix)
     keep = max(1, int(np.count_nonzero(
         singular > epsrel * singular[0]))) if epsrel > 0 else len(singular)
     if max_bond_dimension is not None:
@@ -148,8 +189,7 @@ def _gse_expand(mps, mpo, epsrel, max_bond_dimension):
             else:
                 projected = mapped_matrix - (
                     mapped_matrix @ current_matrix.conj().T) @ current_matrix
-                _, singular, vh = scipy.linalg.svd(
-                    projected, full_matrices=False)
+                _, singular, vh = _safe_svd(projected)
                 threshold = max(epsrel, 1.0e-12) * mapped_norm
                 keep = int(np.count_nonzero(singular > threshold))
                 if max_bond_dimension is not None:
@@ -163,8 +203,7 @@ def _gse_expand(mps, mpo, epsrel, max_bond_dimension):
             extra = vh[:keep]
             extra = extra - (
                 extra @ current_matrix.conj().T) @ current_matrix
-            _, s_extra, vh_extra = scipy.linalg.svd(
-                extra, full_matrices=False)
+            _, s_extra, vh_extra = _safe_svd(extra)
             valid = int(np.count_nonzero(s_extra > 1.0e-10))
             extra = vh_extra[:valid]
             expanded = np.vstack((current_matrix, extra))
@@ -182,9 +221,8 @@ def _gse_expand(mps, mpo, epsrel, max_bond_dimension):
         if index == min_expandable:
             break
 
-        u_phi, s_phi, vh_phi = scipy.linalg.svd(
-            target.reshape(target.shape[0], physical * target.shape[2]),
-            full_matrices=False)
+        u_phi, s_phi, vh_phi = _safe_svd(
+            target.reshape(target.shape[0], physical * target.shape[2]))
         if s_phi.size == 0 or s_phi[0] == 0.0:
             break
         keep_phi = max(1, int(np.count_nonzero(
@@ -436,8 +474,7 @@ class TdvpTempoBackend:
                     tensor = mps.tensors[index]
                     left_dim, physical, right_dim = tensor.shape
                     matrix = tensor.reshape(left_dim * physical, right_dim)
-                    u, singular, vh = scipy.linalg.svd(
-                        matrix, full_matrices=False)
+                    u, singular, vh = _safe_svd(matrix)
                     keep = min(len(singular), self.parameters.max_bond_dimension
                                or len(singular))
                     u, singular, vh = u[:, :keep], singular[:keep], vh[:keep]
@@ -461,8 +498,7 @@ class TdvpTempoBackend:
                     tensor = mps.tensors[index]
                     left_dim, physical, right_dim = tensor.shape
                     matrix = tensor.reshape(left_dim, physical * right_dim)
-                    u, singular, vh = scipy.linalg.svd(
-                        matrix, full_matrices=False)
+                    u, singular, vh = _safe_svd(matrix)
                     keep = min(len(singular), self.parameters.max_bond_dimension
                                or len(singular))
                     u, singular, vh = u[:, :keep], singular[:keep], vh[:keep]
